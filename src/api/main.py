@@ -27,6 +27,7 @@ from contextlib import asynccontextmanager
 import csv
 import io
 import logging
+import os
 from datetime import datetime
 
 from .models import (
@@ -39,6 +40,7 @@ from .models import (
 from .services import ShortlistService, PipelineService
 from .ai_routes import router as ai_router
 from .rag_routes import router as rag_router
+from . import db
 
 # Configure logging
 logging.basicConfig(
@@ -65,9 +67,13 @@ async def lifespan(app: FastAPI):
 
     logger.info("Services initialized")
 
+    # Initialize DB pool
+    db.get_pool()
+
     yield
 
     # Cleanup
+    db.close_pool()
     logger.info("Shutting down Smartacus API...")
 
 
@@ -113,16 +119,41 @@ async def health_check():
     """
     Health check endpoint.
 
-    Returns status of all system components.
+    Returns real status of all system components:
+    - Database connectivity and version
+    - Keepa API key presence
+    - Latest pipeline run summary
     """
-    # TODO: Add actual health checks for DB, Keepa, etc.
+    db_health = db.check_health()
+    last_run = db.get_latest_pipeline_run()
+
+    keepa_key = os.getenv("KEEPA_API_KEY", "")
+    keepa_status = "configured" if keepa_key else "not_configured"
+
+    overall = "healthy" if db_health["status"] == "connected" else "degraded"
+
     return HealthResponse(
-        status="healthy",
-        version="0.1.0",
-        database="connected",  # TODO: Check actual connection
-        keepa="configured",    # TODO: Check API key validity
-        last_pipeline_run=datetime.utcnow(),
+        status=overall,
+        version="0.2.0",
+        database=db_health["status"],
+        database_version=db_health.get("version"),
+        database_size_mb=db_health.get("size_mb"),
+        keepa=keepa_status,
+        last_pipeline_run=last_run,
     )
+
+
+@app.get("/api/observability")
+async def get_observability():
+    """
+    Observability endpoint — DB metrics, table sizes, row counts.
+
+    Used for monitoring and alerting.
+    """
+    metrics = db.get_db_metrics()
+    if metrics is None:
+        raise HTTPException(status_code=503, detail="Database not reachable")
+    return metrics
 
 
 # ============================================================================
@@ -310,6 +341,34 @@ async def run_pipeline(request: RunPipelineRequest = None):
     except Exception as e:
         logger.error(f"Error starting pipeline: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# MAINTENANCE ENDPOINTS
+# ============================================================================
+
+@app.post("/api/maintenance/cleanup")
+async def run_cleanup(
+    retention_days: int = Query(180, ge=30, le=365, description="Days to retain"),
+):
+    """
+    Run database maintenance: cleanup old events + VACUUM ANALYZE.
+
+    Call this after each pipeline run or on a schedule (2x/week minimum).
+    """
+    result = db.run_maintenance(retention_days=retention_days)
+    return result
+
+
+@app.post("/api/maintenance/refresh-views")
+async def refresh_views():
+    """
+    Refresh all materialized views (CONCURRENTLY).
+
+    Call this after each pipeline run.
+    """
+    result = db.refresh_materialized_views()
+    return result
 
 
 # ============================================================================

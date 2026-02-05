@@ -152,8 +152,10 @@ class HealthResponse(BaseModel):
     status: str
     version: str
     database: str
+    databaseVersion: Optional[str] = Field(None, alias="database_version")
+    databaseSizeMb: Optional[float] = Field(None, alias="database_size_mb")
     keepa: str
-    lastPipelineRun: Optional[datetime] = Field(None, alias="last_pipeline_run")
+    lastPipelineRun: Optional[Dict] = Field(None, alias="last_pipeline_run")
 
     class Config:
         populate_by_name = True

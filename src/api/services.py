@@ -535,9 +535,31 @@ class PipelineService:
         self._status: PipelineStatusEnum = PipelineStatusEnum.IDLE
 
     def get_status(self) -> PipelineStatus:
-        """Get current pipeline status."""
+        """Get current pipeline status from DB (with mock fallback)."""
         now = datetime.utcnow()
 
+        try:
+            from . import db
+            last_run = db.get_latest_pipeline_run()
+            if last_run:
+                status_map = {
+                    "running": PipelineStatusEnum.RUNNING,
+                    "completed": PipelineStatusEnum.COMPLETED,
+                    "degraded": PipelineStatusEnum.COMPLETED,
+                    "failed": PipelineStatusEnum.ERROR,
+                    "cancelled": PipelineStatusEnum.IDLE,
+                }
+                return PipelineStatus(
+                    last_run_at=last_run.get("started_at"),
+                    status=status_map.get(last_run.get("status"), PipelineStatusEnum.IDLE),
+                    asins_tracked=last_run.get("asins_ok") or 0,
+                    opportunities_found=last_run.get("opportunities_generated") or 0,
+                    next_run_at=None,
+                )
+        except Exception as e:
+            logger.warning(f"Could not get pipeline status from DB: {e}")
+
+        # Fallback to demo status
         return PipelineStatus(
             last_run_at=now - timedelta(hours=2),
             status=PipelineStatusEnum.COMPLETED,
@@ -551,12 +573,25 @@ class PipelineService:
         max_asins: Optional[int] = None,
         force_refresh: bool = False,
     ) -> Dict[str, Any]:
-        """Trigger a pipeline run."""
+        """Trigger a pipeline run with DB tracking."""
+        try:
+            from . import db
+            config = {"max_asins": max_asins, "force_refresh": force_refresh}
+            run_id = db.create_pipeline_run(triggered_by="api", config_snapshot=config)
+            if run_id:
+                logger.info(f"Pipeline run created in DB: run_id={run_id}")
+                return {
+                    "status": "queued",
+                    "message": f"Pipeline run {run_id[:8]} queued successfully",
+                    "run_id": run_id,
+                }
+        except Exception as e:
+            logger.warning(f"Could not create pipeline run in DB: {e}")
+
+        # Fallback
         import uuid
-
         run_id = str(uuid.uuid4())[:8]
-        logger.info(f"Pipeline run requested: run_id={run_id}, max_asins={max_asins}")
-
+        logger.info(f"Pipeline run requested (no DB): run_id={run_id}")
         return {
             "status": "queued",
             "message": f"Pipeline run {run_id} queued successfully",
