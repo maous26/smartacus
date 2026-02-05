@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Header } from '@/components/Header';
 import { OpportunityCard } from '@/components/OpportunityCard';
 import { OpportunityDetail } from '@/components/OpportunityDetail';
@@ -18,6 +18,12 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [dataSource, setDataSource] = useState<'api' | 'mock'>('mock');
   const [showAgentChat, setShowAgentChat] = useState(false);
+
+  // Filters
+  const [filterUrgency, setFilterUrgency] = useState<string>('all');
+  const [filterMinScore, setFilterMinScore] = useState<number>(0);
+  const [filterEventType, setFilterEventType] = useState<string>('all');
+  const [isExporting, setIsExporting] = useState(false);
 
   // Fetch data from API
   useEffect(() => {
@@ -48,6 +54,36 @@ export default function Home() {
   }, []);
 
   const { summary, opportunities } = shortlistData;
+
+  // Filtered opportunities
+  const filteredOpportunities = useMemo(() => {
+    return opportunities.filter((opp) => {
+      if (filterUrgency !== 'all' && opp.urgencyLevel !== filterUrgency) return false;
+      if (opp.finalScore < filterMinScore) return false;
+      if (filterEventType !== 'all') {
+        const hasEvent = opp.economicEvents?.some(
+          (ev) => ev.eventType === filterEventType
+        );
+        if (!hasEvent) return false;
+      }
+      return true;
+    });
+  }, [opportunities, filterUrgency, filterMinScore, filterEventType]);
+
+  const handleExportCSV = async () => {
+    setIsExporting(true);
+    try {
+      await api.downloadCSV({
+        urgency: filterUrgency !== 'all' ? filterUrgency : undefined,
+        eventType: filterEventType !== 'all' ? filterEventType : undefined,
+        minScore: filterMinScore > 0 ? filterMinScore : undefined,
+      });
+    } catch {
+      alert('Export CSV non disponible (backend requis)');
+    } finally {
+      setIsExporting(false);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -99,6 +135,75 @@ export default function Home() {
           </div>
         </div>
 
+        {/* Filters & Export */}
+        {!isLoading && (
+          <div className="bg-white rounded-xl border border-gray-200 p-4 mb-6">
+            <div className="flex flex-wrap items-center gap-4">
+              {/* Urgency filter */}
+              <div className="flex items-center gap-2">
+                <label className="text-sm font-medium text-gray-700">Urgence:</label>
+                <select
+                  value={filterUrgency}
+                  onChange={(e) => setFilterUrgency(e.target.value)}
+                  className="text-sm border border-gray-300 rounded-lg px-3 py-1.5 bg-white text-gray-700 focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+                >
+                  <option value="all">Toutes</option>
+                  <option value="critical">Critique</option>
+                  <option value="urgent">Urgent</option>
+                  <option value="active">Actif</option>
+                  <option value="standard">Standard</option>
+                  <option value="extended">Etendu</option>
+                </select>
+              </div>
+
+              {/* Min score filter */}
+              <div className="flex items-center gap-2">
+                <label className="text-sm font-medium text-gray-700">Score min:</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={filterMinScore}
+                  onChange={(e) => setFilterMinScore(Number(e.target.value))}
+                  className="text-sm border border-gray-300 rounded-lg px-3 py-1.5 w-20 bg-white text-gray-700 focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+                />
+              </div>
+
+              {/* Event type filter */}
+              <div className="flex items-center gap-2">
+                <label className="text-sm font-medium text-gray-700">Event:</label>
+                <select
+                  value={filterEventType}
+                  onChange={(e) => setFilterEventType(e.target.value)}
+                  className="text-sm border border-gray-300 rounded-lg px-3 py-1.5 bg-white text-gray-700 focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+                >
+                  <option value="all">Tous</option>
+                  <option value="SUPPLY_SHOCK">Supply Shock</option>
+                  <option value="COMPETITOR_COLLAPSE">Competitor Collapse</option>
+                  <option value="QUALITY_DECAY">Quality Decay</option>
+                </select>
+              </div>
+
+              {/* Results count */}
+              <div className="text-sm text-gray-500">
+                {filteredOpportunities.length}/{opportunities.length} affichees
+              </div>
+
+              {/* Export CSV button */}
+              <button
+                onClick={handleExportCSV}
+                disabled={isExporting}
+                className="ml-auto flex items-center gap-2 px-4 py-1.5 bg-gray-900 text-white text-sm font-medium rounded-lg hover:bg-gray-800 disabled:opacity-50 transition-colors"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+                {isExporting ? 'Export...' : 'Export CSV'}
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Loading state */}
         {isLoading && (
           <div className="flex items-center justify-center py-12">
@@ -114,14 +219,14 @@ export default function Home() {
             <div className="space-y-4">
               <div className="flex items-center justify-between mb-2">
                 <h2 className="text-lg font-semibold text-gray-900">
-                  Top {opportunities.length} Opportunités
+                  Top {filteredOpportunities.length} Opportunités
                 </h2>
                 <span className="text-sm text-gray-500">
                   Généré le {formatDate(summary.generatedAt)}
                 </span>
               </div>
 
-              {opportunities.map((opp) => (
+              {filteredOpportunities.map((opp) => (
                 <OpportunityCard
                   key={opp.asin}
                   opportunity={opp}

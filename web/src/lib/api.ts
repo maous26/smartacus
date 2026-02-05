@@ -216,6 +216,40 @@ export interface AgentResponse {
 
 export const api = {
   /**
+   * Download shortlist as CSV file
+   */
+  async downloadCSV(params?: {
+    maxItems?: number;
+    minScore?: number;
+    minValue?: number;
+    urgency?: string;
+    eventType?: string;
+  }): Promise<void> {
+    const searchParams = new URLSearchParams();
+    if (params?.maxItems) searchParams.set('max_items', params.maxItems.toString());
+    if (params?.minScore) searchParams.set('min_score', params.minScore.toString());
+    if (params?.minValue) searchParams.set('min_value', params.minValue.toString());
+    if (params?.urgency) searchParams.set('urgency', params.urgency);
+    if (params?.eventType) searchParams.set('event_type', params.eventType);
+
+    const query = searchParams.toString();
+    const url = `${API_BASE_URL}/api/shortlist/export${query ? `?${query}` : ''}`;
+
+    const response = await fetch(url);
+    if (!response.ok) throw new Error('Export failed');
+
+    const blob = await response.blob();
+    const downloadUrl = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = downloadUrl;
+    a.download = `smartacus_shortlist.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(downloadUrl);
+  },
+
+  /**
    * Get the opportunity shortlist
    */
   async getShortlist(params?: {

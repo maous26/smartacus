@@ -22,7 +22,10 @@ load_dotenv()
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from contextlib import asynccontextmanager
+import csv
+import io
 import logging
 from datetime import datetime
 
@@ -153,6 +156,90 @@ async def get_shortlist(
         return shortlist
     except Exception as e:
         logger.error(f"Error generating shortlist: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/shortlist/export")
+async def export_shortlist_csv(
+    max_items: int = Query(5, ge=1, le=10),
+    min_score: int = Query(50, ge=0, le=100),
+    min_value: float = Query(5000, ge=0),
+    urgency: str = Query(None, description="Filter by urgency level (critical,urgent,active,standard,extended)"),
+    event_type: str = Query(None, description="Filter by event type (SUPPLY_SHOCK,COMPETITOR_COLLAPSE,QUALITY_DECAY)"),
+):
+    """
+    Export shortlist as CSV file.
+
+    Supports the same filters as the shortlist endpoint plus urgency and event_type filters.
+    """
+    try:
+        shortlist = shortlist_service.get_shortlist(
+            max_items=max_items,
+            min_score=min_score,
+            min_value=min_value,
+        )
+
+        opportunities = shortlist.opportunities
+
+        # Apply urgency filter
+        if urgency:
+            allowed = {u.strip().lower() for u in urgency.split(",")}
+            opportunities = [o for o in opportunities if o.urgencyLevel.value in allowed]
+
+        # Apply event type filter
+        if event_type:
+            allowed_events = {e.strip().upper() for e in event_type.split(",")}
+            opportunities = [
+                o for o in opportunities
+                if any(ev.eventType in allowed_events for ev in o.economicEvents)
+            ]
+
+        # Build CSV
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow([
+            "Rank", "ASIN", "Title", "Brand", "Score", "Base Score",
+            "Time Multiplier", "Monthly Profit ($)", "Annual Value ($)",
+            "Risk-Adjusted Value ($)", "Window (days)", "Urgency",
+            "Thesis", "Action", "Events", "Price ($)", "Reviews", "Rating",
+        ])
+
+        for i, opp in enumerate(opportunities, 1):
+            events_str = " | ".join(
+                f"{ev.eventType}: {ev.thesis}" for ev in opp.economicEvents
+            ) if opp.economicEvents else ""
+
+            writer.writerow([
+                i,
+                opp.asin,
+                opp.title or "",
+                opp.brand or "",
+                opp.finalScore,
+                opp.baseScore,
+                opp.timeMultiplier,
+                f"{opp.estimatedMonthlyProfit:.0f}",
+                f"{opp.estimatedAnnualValue:.0f}",
+                f"{opp.riskAdjustedValue:.0f}",
+                opp.windowDays,
+                opp.urgencyLevel.value,
+                opp.thesis,
+                opp.actionRecommendation,
+                events_str,
+                opp.amazonPrice or "",
+                opp.reviewCount or "",
+                opp.rating or "",
+            ])
+
+        output.seek(0)
+        filename = f"smartacus_shortlist_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.csv"
+
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
+    except Exception as e:
+        logger.error(f"Error exporting CSV: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
