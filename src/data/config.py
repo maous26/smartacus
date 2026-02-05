@@ -101,7 +101,9 @@ class KeepaConfig:
 
     api_key: str = field(default_factory=lambda: get_env("KEEPA_API_KEY", required=True))
 
-    # Rate limiting (Plan 49 EUR = ~300 tokens/minute, conservative default)
+    # Rate limiting — tokens_per_minute = max burst capacity (local bucket size).
+    # Actual refill rate is plan-dependent (currently 21 tokens/min).
+    # The client syncs real-time token balance from Keepa API responses.
     tokens_per_minute: int = field(default_factory=lambda: get_env_int("KEEPA_TOKENS_PER_MINUTE", 200))
 
     # Retry configuration

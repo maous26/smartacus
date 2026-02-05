@@ -110,6 +110,69 @@ def get_or_create_session(session_id: Optional[str]) -> tuple:
 
 
 # =============================================================================
+# CONTEXT ENRICHMENT
+# =============================================================================
+
+def _enrich_context(context):
+    """Auto-inject review_profile and spec_bundle from DB into agent context."""
+    asin = context.asin
+    if not asin:
+        return
+
+    try:
+        from . import db
+        from .shared import load_profile
+
+        pool = db.get_pool()
+        if not pool:
+            return
+
+        conn = pool.getconn()
+        try:
+            # Review intelligence profile
+            profile = load_profile(conn, asin)
+            if profile:
+                context.review_profile = {
+                    "improvement_score": profile.improvement_score,
+                    "dominant_pain": profile.dominant_pain,
+                    "reviews_analyzed": profile.reviews_analyzed,
+                    "negative_reviews_analyzed": profile.negative_reviews_analyzed,
+                    "has_actionable_insights": profile.has_actionable_insights,
+                    "thesis_fragment": profile.to_thesis_fragment(),
+                    "top_defects": [
+                        {"type": d.defect_type, "freq": d.frequency,
+                         "severity": d.severity_score, "rate": d.frequency_rate}
+                        for d in profile.top_defects
+                    ],
+                    "missing_features": [
+                        {"feature": f.feature, "mentions": f.mentions,
+                         "wish_strength": f.wish_strength}
+                        for f in profile.missing_features
+                    ],
+                }
+
+            # Product spec bundle
+            try:
+                from ..specs import SpecGenerator
+                generator = SpecGenerator()
+                cached = generator.load_bundle_from_db(conn, asin)
+                if cached:
+                    context.spec_bundle = {
+                        "oem_spec_text": cached.get("oem_spec_text", ""),
+                        "qc_checklist_text": cached.get("qc_checklist_text", ""),
+                        "rfq_message_text": cached.get("rfq_message_text", ""),
+                        "total_requirements": cached.get("total_requirements", 0),
+                        "total_qc_tests": cached.get("total_qc_tests", 0),
+                    }
+            except Exception:
+                pass  # Spec module optional
+        finally:
+            pool.putconn(conn)
+    except Exception as e:
+        logger.warning(f"Context enrichment failed for {asin}: {e}")
+
+
+# =============================================================================
 # THESIS ENDPOINT
 # =============================================================================
 
@@ -197,6 +260,9 @@ async def agent_message(request: AgentMessageRequest):
             messages=session["messages"],
         )
 
+        # Enrich context with review intelligence + spec bundle
+        _enrich_context(context)
+
         # Sélectionner l'agent
         agents = {
             "discovery": DiscoveryAgent,
@@ -268,6 +334,9 @@ async def present_opportunity(
             thesis=thesis,
             messages=session["messages"],
         )
+
+        # Enrich context with review intelligence + spec bundle
+        _enrich_context(context)
 
         agent = DiscoveryAgent()
         response = await agent.present_opportunity(

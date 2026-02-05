@@ -40,6 +40,8 @@ from .models import (
 from .services import ShortlistService, PipelineService
 from .ai_routes import router as ai_router
 from .rag_routes import router as rag_router
+from .spec_routes import router as spec_router
+from .review_routes import router as review_router
 from . import db
 
 # Configure logging
@@ -109,6 +111,12 @@ app.include_router(ai_router)
 # Include RAG routes
 app.include_router(rag_router)
 
+# Include Spec routes
+app.include_router(spec_router)
+
+# Include Review Intelligence routes
+app.include_router(review_router)
+
 
 # ============================================================================
 # HEALTH ENDPOINT
@@ -162,20 +170,14 @@ async def get_observability():
 
 @app.get("/api/shortlist", response_model=ShortlistResponse)
 async def get_shortlist(
-    max_items: int = Query(5, ge=1, le=10, description="Maximum items in shortlist"),
-    min_score: int = Query(50, ge=0, le=100, description="Minimum score threshold"),
-    min_value: float = Query(5000, ge=0, description="Minimum annual value ($)"),
+    max_items: int = Query(25, ge=1, le=100, description="Maximum items in shortlist"),
+    min_score: int = Query(40, ge=0, le=100, description="Minimum score threshold"),
+    min_value: float = Query(0, ge=0, description="Minimum annual value ($)"),
 ):
     """
     Get the current opportunity shortlist.
 
     Returns top opportunities ranked by value x urgency.
-
-    The shortlist is CONSTRAINED by design:
-    - Maximum 5 items (concentration over dispersion)
-    - Each item has a clear thesis and action recommendation
-    - Ranked by risk-adjusted value weighted by urgency
-
     Response matches frontend ShortlistResponse type.
     """
     try:
@@ -192,9 +194,9 @@ async def get_shortlist(
 
 @app.get("/api/shortlist/export")
 async def export_shortlist_csv(
-    max_items: int = Query(5, ge=1, le=10),
-    min_score: int = Query(50, ge=0, le=100),
-    min_value: float = Query(5000, ge=0),
+    max_items: int = Query(25, ge=1, le=100),
+    min_score: int = Query(40, ge=0, le=100),
+    min_value: float = Query(0, ge=0),
     urgency: str = Query(None, description="Filter by urgency level (critical,urgent,active,standard,extended)"),
     event_type: str = Query(None, description="Filter by event type (SUPPLY_SHOCK,COMPETITOR_COLLAPSE,QUALITY_DECAY)"),
 ):

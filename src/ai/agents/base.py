@@ -81,6 +81,10 @@ class AgentContext:
     sourcing_options: List[Dict[str, Any]] = field(default_factory=list)
     negotiation_history: List[Dict[str, Any]] = field(default_factory=list)
 
+    # Auto-injected intelligence data
+    review_profile: Dict[str, Any] = field(default_factory=dict)
+    spec_bundle: Dict[str, Any] = field(default_factory=dict)
+
     # RAG citations (for traceability)
     rag_citations: List[Dict[str, Any]] = field(default_factory=list)
     session_id: Optional[str] = None
@@ -333,3 +337,41 @@ class BaseAgent(ABC):
     @property
     def total_cost(self) -> float:
         return self._total_cost
+
+
+def compute_confidence(context: AgentContext) -> tuple:
+    """Compute data-driven confidence score.
+
+    Returns (confidence_float, optional_caveat_string).
+    """
+    rp = context.review_profile or {}
+    opp = context.opportunity_data or {}
+
+    reviews_analyzed = rp.get("reviews_analyzed", 0)
+    improvement_score = rp.get("improvement_score", 0)
+    component_scores = opp.get("component_scores", {})
+
+    confidence = 0.65
+    caveat = None
+
+    # Boost for review data quality
+    if reviews_analyzed >= 50 and improvement_score > 0:
+        confidence = 0.85
+    elif reviews_analyzed >= 20:
+        confidence = 0.75
+    elif reviews_analyzed > 0:
+        confidence = 0.55
+        caveat = f"Confiance limitee: seulement {reviews_analyzed} avis analyses"
+    else:
+        caveat = "Pas de donnees reviews — confiance basee uniquement sur le scoring"
+
+    # Boost for strong component scores
+    if component_scores:
+        percentages = []
+        for data in component_scores.values():
+            max_s = data.get("max_score", 1) or 1
+            percentages.append(data.get("score", 0) / max_s)
+        if percentages and all(p > 0.5 for p in percentages):
+            confidence = max(confidence, 0.9)
+
+    return round(min(1.0, confidence), 2), caveat

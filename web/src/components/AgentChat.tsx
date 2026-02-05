@@ -7,6 +7,7 @@ import { Opportunity } from '@/types/opportunity';
 interface AgentChatProps {
   opportunity: Opportunity;
   onClose: () => void;
+  initialAgent?: 'discovery' | 'analyst' | 'sourcing' | 'negotiator';
 }
 
 const AGENT_INFO = {
@@ -36,12 +37,54 @@ const AGENT_INFO = {
   },
 };
 
-export function AgentChat({ opportunity, onClose }: AgentChatProps) {
+/**
+ * Build a full snake_case payload from the Opportunity object
+ * so the backend agents receive ALL available data.
+ */
+function buildOpportunityPayload(opp: Opportunity): Record<string, unknown> {
+  return {
+    asin: opp.asin,
+    title: opp.title,
+    brand: opp.brand,
+    rank: opp.rank,
+    final_score: opp.finalScore,
+    base_score: opp.baseScore,
+    time_multiplier: opp.timeMultiplier,
+    estimated_monthly_profit: opp.estimatedMonthlyProfit,
+    estimated_annual_value: opp.estimatedAnnualValue,
+    risk_adjusted_value: opp.riskAdjustedValue,
+    window_days: opp.windowDays,
+    urgency_level: opp.urgencyLevel,
+    urgency_label: opp.urgencyLabel,
+    thesis: opp.thesis,
+    action_recommendation: opp.actionRecommendation,
+    amazon_price: opp.amazonPrice,
+    review_count: opp.reviewCount,
+    rating: opp.rating,
+    detected_at: opp.detectedAt,
+    component_scores: opp.componentScores
+      ? Object.fromEntries(
+          Object.entries(opp.componentScores).map(([key, val]) => [
+            key,
+            { name: val.name, score: val.score, max_score: val.maxScore, percentage: val.percentage },
+          ])
+        )
+      : {},
+    economic_events: (opp.economicEvents || []).map((e) => ({
+      event_type: e.eventType,
+      thesis: e.thesis,
+      confidence: e.confidence,
+      urgency: e.urgency,
+    })),
+  };
+}
+
+export function AgentChat({ opportunity, onClose, initialAgent = 'discovery' }: AgentChatProps) {
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [currentAgent, setCurrentAgent] = useState<keyof typeof AGENT_INFO>('discovery');
+  const [currentAgent, setCurrentAgent] = useState<keyof typeof AGENT_INFO>(initialAgent);
   const [error, setError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -60,22 +103,21 @@ export function AgentChat({ opportunity, onClose }: AgentChatProps) {
   async function initializeConversation() {
     setIsLoading(true);
     setError(null);
-    setMessages([]);
+
+    // Show an immediate welcome message so the chat isn't blank
+    const welcomeMessage: AgentMessage = {
+      role: 'agent',
+      content: `Bienvenue ! Je suis le **Discovery Agent**. J'analyse **${opportunity.title?.slice(0, 50)}...** pour vous.`,
+      timestamp: new Date().toISOString(),
+      agentType: 'discovery',
+    };
+    setMessages([welcomeMessage]);
 
     try {
+      const oppData = buildOpportunityPayload(opportunity);
       const response = await api.presentOpportunity({
         asin: opportunity.asin,
-        opportunityData: {
-          asin: opportunity.asin,
-          title: opportunity.title,
-          brand: opportunity.brand,
-          amazon_price: opportunity.amazonPrice,
-          final_score: opportunity.finalScore,
-          window_days: opportunity.windowDays,
-          urgency_level: opportunity.urgencyLevel,
-          review_count: opportunity.reviewCount,
-          rating: opportunity.rating,
-        },
+        opportunityData: oppData,
         thesis: {
           headline: opportunity.thesis,
           thesis: opportunity.actionRecommendation,
@@ -86,7 +128,8 @@ export function AgentChat({ opportunity, onClose }: AgentChatProps) {
       addAgentMessage(response);
     } catch (err) {
       console.error('Failed to initialize conversation:', err);
-      setError('Impossible de démarrer la conversation. Vérifiez que l\'API IA est configurée.');
+      const detail = err instanceof Error ? err.message : 'Erreur inconnue';
+      setError(`Impossible de démarrer la conversation : ${detail}`);
     } finally {
       setIsLoading(false);
     }
@@ -131,10 +174,7 @@ export function AgentChat({ opportunity, onClose }: AgentChatProps) {
         sessionId: sessionId || undefined,
         context: {
           asin: opportunity.asin,
-          opportunity_data: {
-            title: opportunity.title,
-            amazon_price: opportunity.amazonPrice,
-          },
+          opportunity_data: buildOpportunityPayload(opportunity),
         },
       });
 
@@ -173,10 +213,7 @@ export function AgentChat({ opportunity, onClose }: AgentChatProps) {
         sessionId: sessionId || undefined,
         context: {
           asin: opportunity.asin,
-          opportunity_data: {
-            title: opportunity.title,
-            amazon_price: opportunity.amazonPrice,
-          },
+          opportunity_data: buildOpportunityPayload(opportunity),
         },
       });
 
@@ -190,8 +227,10 @@ export function AgentChat({ opportunity, onClose }: AgentChatProps) {
     }
   }
 
-  function switchAgent(agent: keyof typeof AGENT_INFO) {
+  async function switchAgent(agent: keyof typeof AGENT_INFO) {
+    if (agent === currentAgent || isLoading) return;
     setCurrentAgent(agent);
+
     // Add system message about agent switch
     const systemMessage: AgentMessage = {
       role: 'agent',
@@ -200,6 +239,37 @@ export function AgentChat({ opportunity, onClose }: AgentChatProps) {
       agentType: agent,
     };
     setMessages((prev) => [...prev, systemMessage]);
+
+    // Trigger a real interaction with the new agent
+    setIsLoading(true);
+    setError(null);
+
+    const introPrompts: Record<string, string> = {
+      discovery: `Présente-moi cette opportunité : ${opportunity.title}`,
+      analyst: `Analyse en profondeur cette opportunité : ${opportunity.title} (score ${opportunity.finalScore}/100)`,
+      sourcing: `Guide-moi pour trouver des fournisseurs pour : ${opportunity.title}`,
+      negotiator: `Prépare une stratégie de négociation pour : ${opportunity.title}`,
+    };
+
+    try {
+      const response = await api.sendAgentMessage({
+        agentType: agent,
+        message: introPrompts[agent],
+        sessionId: sessionId || undefined,
+        context: {
+          asin: opportunity.asin,
+          opportunity_data: buildOpportunityPayload(opportunity),
+        },
+      });
+
+      setSessionId(response.sessionId);
+      addAgentMessage(response);
+    } catch (err) {
+      console.error('Failed to initialize agent:', err);
+      setError(`Erreur lors de l'initialisation de ${AGENT_INFO[agent].name}. Vérifiez que le backend est démarré.`);
+    } finally {
+      setIsLoading(false);
+    }
   }
 
   return (
@@ -232,10 +302,13 @@ export function AgentChat({ opportunity, onClose }: AgentChatProps) {
           <button
             key={agent}
             onClick={() => switchAgent(agent)}
+            disabled={isLoading}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-colors whitespace-nowrap ${
               currentAgent === agent
                 ? `${AGENT_INFO[agent].color} text-white`
-                : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
+                : isLoading
+                  ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                  : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
             }`}
           >
             <span>{AGENT_INFO[agent].icon}</span>
@@ -255,7 +328,13 @@ export function AgentChat({ opportunity, onClose }: AgentChatProps) {
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {error && (
           <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-red-700 text-sm">
-            {error}
+            <p>{error}</p>
+            <button
+              onClick={() => { setError(null); initializeConversation(); }}
+              className="mt-2 px-3 py-1 bg-red-100 hover:bg-red-200 rounded text-xs font-medium transition-colors"
+            >
+              Réessayer
+            </button>
           </div>
         )}
 
@@ -331,7 +410,7 @@ export function AgentChat({ opportunity, onClose }: AgentChatProps) {
                   <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
                   <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
                 </div>
-                <span className="text-sm text-gray-500">L'agent réfléchit...</span>
+                <span className="text-sm text-gray-500">{agentConfig.name} réfléchit...</span>
               </div>
             </div>
           </div>

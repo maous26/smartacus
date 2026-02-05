@@ -49,7 +49,7 @@ def test_keepa_connection():
         print("Test de récupération d'un produit...")
         test_asin = "B08L5TNJHG"  # Un car phone mount populaire
 
-        products = api.query(test_asin, domain='US')
+        products = api.query(test_asin, domain='FR')
 
         if products:
             product = products[0]

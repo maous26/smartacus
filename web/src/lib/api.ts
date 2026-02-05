@@ -5,7 +5,7 @@
  * Client pour communiquer avec le backend FastAPI.
  */
 
-import { ShortlistResponse, PipelineStatus } from '@/types/opportunity';
+import { ShortlistResponse, PipelineStatus, SpecBundle, ReviewProfile } from '@/types/opportunity';
 
 // Configuration
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -446,6 +446,135 @@ export const api = {
       nextStage: response.next_stage,
       requiresInput: response.requires_input,
       sessionId: response.session_id,
+    };
+  },
+  // ===========================================================================
+  // SPEC ENDPOINTS
+  // ===========================================================================
+
+  /**
+   * Get product spec bundle for an ASIN
+   */
+  async getSpecBundle(asin: string, options?: {
+    regenerate?: boolean;
+    runId?: string;
+  }): Promise<SpecBundle> {
+    const searchParams = new URLSearchParams();
+    if (options?.regenerate) searchParams.set('regenerate', 'true');
+    if (options?.runId) searchParams.set('run_id', options.runId);
+
+    const query = searchParams.toString();
+    const endpoint = `/api/specs/${asin}${query ? `?${query}` : ''}`;
+
+    const response = await fetchApi<{
+      asin: string;
+      generated_at: string | null;
+      version: string;
+      mapping_version: string;
+      inputs_hash: string;
+      run_id: string | null;
+      improvement_score: number;
+      reviews_analyzed: number;
+      total_requirements: number;
+      total_qc_tests: number;
+      oem_spec_text: string;
+      qc_checklist_text: string;
+      rfq_message_text: string;
+      bundle: Record<string, any> | null;
+    }>(endpoint);
+
+    return {
+      asin: response.asin,
+      generatedAt: response.generated_at || '',
+      version: response.version,
+      mappingVersion: response.mapping_version,
+      inputsHash: response.inputs_hash,
+      runId: response.run_id || undefined,
+      improvementScore: response.improvement_score,
+      reviewsAnalyzed: response.reviews_analyzed,
+      totalRequirements: response.total_requirements,
+      totalQcTests: response.total_qc_tests,
+      oemSpecText: response.oem_spec_text,
+      qcChecklistText: response.qc_checklist_text,
+      rfqMessageText: response.rfq_message_text,
+      bundle: response.bundle ? {
+        oem_spec: {
+          bloc_a: response.bundle.oem_spec?.bloc_a || [],
+          bloc_b: response.bundle.oem_spec?.bloc_b || [],
+          general_materials: response.bundle.oem_spec?.general_materials || [],
+          accessories: response.bundle.oem_spec?.accessories || [],
+        },
+        qc_checklist: {
+          tests: (response.bundle.qc_checklist?.tests || []).map((t: any) => ({
+            category: t.category,
+            name: t.name,
+            method: t.method,
+            passCriterion: t.pass_criterion,
+            priority: t.priority,
+          })),
+        },
+        rfq_message: {
+          subject: response.bundle.rfq_message?.subject || '',
+          body: response.bundle.rfq_message?.body || '',
+          key_requirements: response.bundle.rfq_message?.key_requirements || [],
+        },
+      } : null,
+    };
+  },
+
+  // ===========================================================================
+  // REVIEW INTELLIGENCE ENDPOINTS
+  // ===========================================================================
+
+  async getReviewProfile(asin: string): Promise<ReviewProfile> {
+    const response = await fetchApi<{
+      asin: string;
+      improvement_score: number;
+      dominant_pain: string | null;
+      reviews_analyzed: number;
+      negative_reviews_analyzed: number;
+      reviews_ready: boolean;
+      has_actionable_insights: boolean;
+      thesis_fragment: string;
+      top_defects: Array<{
+        defect_type: string;
+        frequency: number;
+        severity_score: number;
+        frequency_rate: number;
+        example_quotes: string[];
+      }>;
+      missing_features: Array<{
+        feature: string;
+        mentions: number;
+        confidence: number;
+        wish_strength: number;
+        source_quotes: string[];
+      }>;
+    }>(`/api/reviews/${asin}/profile`);
+
+    return {
+      asin: response.asin,
+      improvementScore: response.improvement_score,
+      dominantPain: response.dominant_pain,
+      reviewsAnalyzed: response.reviews_analyzed,
+      negativeReviewsAnalyzed: response.negative_reviews_analyzed,
+      reviewsReady: response.reviews_ready,
+      hasActionableInsights: response.has_actionable_insights,
+      thesisFragment: response.thesis_fragment,
+      topDefects: response.top_defects.map((d) => ({
+        defectType: d.defect_type,
+        frequency: d.frequency,
+        severityScore: d.severity_score,
+        frequencyRate: d.frequency_rate,
+        exampleQuotes: d.example_quotes,
+      })),
+      missingFeatures: response.missing_features.map((f) => ({
+        feature: f.feature,
+        mentions: f.mentions,
+        confidence: f.confidence,
+        wishStrength: f.wish_strength,
+        sourceQuotes: f.source_quotes,
+      })),
     };
   },
 };

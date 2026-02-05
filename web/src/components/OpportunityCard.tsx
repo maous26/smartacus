@@ -3,18 +3,20 @@
 import { Opportunity } from '@/types/opportunity';
 import { UrgencyBadge } from './UrgencyBadge';
 import { ScoreRing } from './ScoreRing';
-import { formatNumber, formatPrice } from '@/lib/format';
+import { formatNumber, formatPrice, formatCurrency } from '@/lib/format';
 
 interface OpportunityCardProps {
   opportunity: Opportunity;
   isSelected?: boolean;
   onClick?: () => void;
+  isDemo?: boolean;
 }
 
 export function OpportunityCard({
   opportunity,
   isSelected = false,
-  onClick
+  onClick,
+  isDemo = false,
 }: OpportunityCardProps) {
   const {
     rank,
@@ -35,11 +37,18 @@ export function OpportunityCard({
     <div
       onClick={onClick}
       className={`
-        bg-white rounded-xl border-2 p-5 cursor-pointer transition-all duration-200
+        relative bg-white rounded-xl border-2 p-5 cursor-pointer transition-all duration-200
         hover:shadow-lg hover:border-primary-300
         ${isSelected ? 'border-primary-500 shadow-lg ring-2 ring-primary-200' : 'border-gray-200'}
       `}
     >
+      {/* DEMO watermark */}
+      {isDemo && (
+        <div className="absolute top-2 right-2 bg-amber-100 text-amber-600 text-[10px] font-bold px-1.5 py-0.5 rounded border border-amber-300 uppercase tracking-wider">
+          Demo
+        </div>
+      )}
+
       {/* Header: Rank + Score + Urgency */}
       <div className="flex items-start justify-between mb-4">
         <div className="flex items-center gap-3">
@@ -72,7 +81,7 @@ export function OpportunityCard({
       <div className="mb-4 p-3 bg-gradient-to-r from-emerald-50 to-green-50 rounded-lg border border-emerald-200">
         <div className="text-sm text-emerald-700 font-medium">Valeur estimée</div>
         <div className="text-2xl font-bold text-emerald-600">
-          ${formatNumber(Math.round(riskAdjustedValue))}<span className="text-sm font-normal text-emerald-500">/an</span>
+          {formatCurrency(Math.round(riskAdjustedValue))}<span className="text-sm font-normal text-emerald-500">/an</span>
         </div>
       </div>
 

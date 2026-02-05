@@ -33,10 +33,10 @@ export function formatNumber(num: number, decimals: number = 0): string {
 }
 
 /**
- * Formate un montant en dollars
+ * Formate un montant en euros
  */
 export function formatCurrency(amount: number, decimals: number = 0): string {
-  return `$${formatNumber(amount, decimals)}`;
+  return `${formatNumber(amount, decimals)}\u00A0\u20AC`;
 }
 
 /**
@@ -64,10 +64,10 @@ export function formatDateTime(dateString: string): string {
 }
 
 /**
- * Formate un prix
+ * Formate un prix en euros
  */
 export function formatPrice(price: number): string {
-  return `$${price.toFixed(2)}`;
+  return `${price.toFixed(2)}\u00A0\u20AC`;
 }
 
 /**

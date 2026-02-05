@@ -1,13 +1,18 @@
 'use client';
 
+import { useState, useEffect } from 'react';
 import { Opportunity, ComponentScore } from '@/types/opportunity';
 import { UrgencyBadge } from './UrgencyBadge';
 import { ScoreRing } from './ScoreRing';
-import { formatNumber, formatPrice, formatDate } from '@/lib/format';
+import { ReviewInsightPanel } from './ReviewInsightPanel';
+import { ProductSpecPanel } from './ProductSpecPanel';
+import { formatNumber, formatPrice, formatCurrency, formatDate } from '@/lib/format';
 
 interface OpportunityDetailProps {
   opportunity: Opportunity;
   onClose?: () => void;
+  onStartSourcing?: () => void;
+  isDemo?: boolean;
 }
 
 function ScoreBar({ name, score, maxScore }: { name: string; score: number; maxScore: number }) {
@@ -37,7 +42,7 @@ function ScoreBar({ name, score, maxScore }: { name: string; score: number; maxS
   );
 }
 
-export function OpportunityDetail({ opportunity, onClose }: OpportunityDetailProps) {
+export function OpportunityDetail({ opportunity, onClose, onStartSourcing, isDemo = false }: OpportunityDetailProps) {
   const {
     rank,
     asin,
@@ -62,8 +67,33 @@ export function OpportunityDetail({ opportunity, onClose }: OpportunityDetailPro
     detectedAt,
   } = opportunity;
 
+  const [isSaved, setIsSaved] = useState(false);
+
+  useEffect(() => {
+    const saved = JSON.parse(localStorage.getItem('smartacus_saved') || '[]') as string[];
+    setIsSaved(saved.includes(asin));
+  }, [asin]);
+
+  const handleSave = () => {
+    const saved = JSON.parse(localStorage.getItem('smartacus_saved') || '[]') as string[];
+    if (saved.includes(asin)) {
+      localStorage.setItem('smartacus_saved', JSON.stringify(saved.filter((a: string) => a !== asin)));
+      setIsSaved(false);
+    } else {
+      saved.push(asin);
+      localStorage.setItem('smartacus_saved', JSON.stringify(saved));
+      setIsSaved(true);
+    }
+  };
+
   return (
     <div className="bg-white rounded-2xl shadow-xl border border-gray-200 overflow-hidden">
+      {/* DEMO banner */}
+      {isDemo && (
+        <div className="bg-amber-400 text-amber-900 text-center text-xs font-bold py-1 uppercase tracking-widest">
+          Données de démonstration
+        </div>
+      )}
       {/* Header */}
       <div className="bg-gradient-to-r from-gray-900 to-gray-800 text-white p-6">
         <div className="flex items-start justify-between">
@@ -100,19 +130,19 @@ export function OpportunityDetail({ opportunity, onClose }: OpportunityDetailPro
           <div className="bg-emerald-50 rounded-xl p-4 text-center border border-emerald-200">
             <div className="text-sm text-emerald-700">Mensuel</div>
             <div className="text-xl font-bold text-emerald-600">
-              ${formatNumber(Math.round(estimatedMonthlyProfit || 0))}
+              {formatCurrency(Math.round(estimatedMonthlyProfit || 0))}
             </div>
           </div>
           <div className="bg-green-50 rounded-xl p-4 text-center border border-green-200">
             <div className="text-sm text-green-700">Annuel</div>
             <div className="text-xl font-bold text-green-600">
-              ${formatNumber(Math.round(estimatedAnnualValue || 0))}
+              {formatCurrency(Math.round(estimatedAnnualValue || 0))}
             </div>
           </div>
           <div className="bg-blue-50 rounded-xl p-4 text-center border border-blue-200">
             <div className="text-sm text-blue-700">Ajusté risque</div>
             <div className="text-xl font-bold text-blue-600">
-              ${formatNumber(Math.round(riskAdjustedValue || 0))}
+              {formatCurrency(Math.round(riskAdjustedValue || 0))}
             </div>
           </div>
         </div>
@@ -132,6 +162,12 @@ export function OpportunityDetail({ opportunity, onClose }: OpportunityDetailPro
             <p className="text-amber-900 font-medium">{actionRecommendation}</p>
           </div>
         </div>
+
+        {/* Review Intelligence Panel */}
+        <ReviewInsightPanel asin={asin} isDemo={isDemo} />
+
+        {/* Product Spec Panel */}
+        <ProductSpecPanel asin={asin} isDemo={isDemo} />
 
         {/* Score breakdown */}
         {componentScores && Object.keys(componentScores).length > 0 && (
@@ -214,23 +250,40 @@ export function OpportunityDetail({ opportunity, onClose }: OpportunityDetailPro
         <div className="mt-6 pt-4 border-t border-gray-200 flex items-center justify-between text-xs text-gray-500">
           <div>Détecté le {formatDate(detectedAt)}</div>
           <a
-            href={`https://www.amazon.com/dp/${asin}`}
+            href={`https://www.amazon.fr/dp/${asin}`}
             target="_blank"
             rel="noopener noreferrer"
             className="text-primary-600 hover:text-primary-700 font-medium"
           >
-            Voir sur Amazon →
+            Voir sur Amazon.fr →
           </a>
         </div>
       </div>
 
       {/* Action buttons */}
       <div className="border-t border-gray-200 p-4 bg-gray-50 flex gap-3">
-        <button className="flex-1 bg-primary-600 text-white py-3 px-4 rounded-lg font-medium hover:bg-primary-700 transition-colors">
-          Lancer le sourcing
-        </button>
-        <button className="px-4 py-3 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-100 transition-colors">
-          Sauvegarder
+        {isDemo && (
+          <div className="flex-1 bg-gray-200 text-gray-500 py-3 px-4 rounded-lg font-medium text-center cursor-not-allowed">
+            Sourcing désactivé (mode démo)
+          </div>
+        )}
+        {!isDemo && (
+          <button
+            onClick={onStartSourcing}
+            className="flex-1 bg-primary-600 text-white py-3 px-4 rounded-lg font-medium hover:bg-primary-700 transition-colors"
+          >
+            Lancer le sourcing
+          </button>
+        )}
+        <button
+          onClick={handleSave}
+          className={`px-4 py-3 border rounded-lg font-medium transition-colors ${
+            isSaved
+              ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
+              : 'border-gray-300 text-gray-700 hover:bg-gray-100'
+          }`}
+        >
+          {isSaved ? 'Sauvegarde' : 'Sauvegarder'}
         </button>
         {onClose && (
           <button

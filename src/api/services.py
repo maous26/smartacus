@@ -312,12 +312,15 @@ class ShortlistService:
 
     def get_shortlist(
         self,
-        max_items: int = 5,
-        min_score: int = 50,
-        min_value: float = 5000,
+        max_items: int = 25,
+        min_score: int = 40,
+        min_value: float = 0,
     ) -> ShortlistResponse:
-        """Generate shortlist from current opportunities."""
-        opportunities = self._get_demo_opportunities(max_items)
+        """Generate shortlist from DB opportunities, with demo fallback."""
+        opportunities = self._get_db_opportunities(max_items, min_score, min_value)
+        if not opportunities:
+            logger.info("No DB opportunities found, using demo data")
+            opportunities = self._get_demo_opportunities(max_items)
 
         total_value = sum(float(o.riskAdjustedValue) for o in opportunities)
 
@@ -337,11 +340,140 @@ class ShortlistService:
             opportunities=opportunities,
         )
 
-    def _get_demo_opportunities(self, max_items: int = 5) -> List[OpportunityModel]:
+    def _get_db_opportunities(
+        self,
+        max_items: int = 25,
+        min_score: int = 40,
+        min_value: float = 0,
+    ) -> List[OpportunityModel]:
+        """Fetch scored opportunities from the latest pipeline run in DB."""
+        try:
+            from . import db
+            pool = db.get_pool()
+            if pool is None:
+                return []
+
+            conn = pool.getconn()
+            try:
+                with conn.cursor() as cur:
+                    # Get artifacts from the latest completed run
+                    cur.execute("""
+                        SELECT
+                            a.asin, a.rank, a.final_score, a.base_score, a.time_multiplier,
+                            a.estimated_monthly_profit, a.estimated_annual_value,
+                            a.risk_adjusted_value, a.window_days, a.urgency_level,
+                            a.thesis, a.action_recommendation,
+                            a.component_scores, a.economic_events,
+                            a.amazon_price, a.review_count, a.rating, a.bsr_primary,
+                            a.scored_at, a.input_data,
+                            m.title, m.brand
+                        FROM opportunity_artifacts a
+                        JOIN pipeline_runs p ON a.run_id = p.run_id
+                        LEFT JOIN asins m ON a.asin = m.asin
+                        WHERE p.status IN ('completed', 'degraded')
+                          AND a.final_score >= %s
+                          AND a.risk_adjusted_value >= %s
+                        ORDER BY a.risk_adjusted_value DESC
+                        LIMIT %s
+                    """, (min_score, min_value, max_items))
+
+                    rows = cur.fetchall()
+                    if not rows:
+                        return []
+
+                    opportunities = []
+                    for i, row in enumerate(rows, 1):
+                        (asin, rank, final_score, base_score, time_multiplier,
+                         monthly_profit, annual_value, risk_adjusted,
+                         window_days, urgency_level, thesis, action_rec,
+                         component_scores_json, events_json,
+                         amazon_price, review_count, rating, bsr,
+                         scored_at, input_data_json,
+                         title, brand) = row
+
+                        # Map urgency string to enum
+                        urgency_map = {
+                            "critical": UrgencyLevel.CRITICAL,
+                            "urgent": UrgencyLevel.URGENT,
+                            "active": UrgencyLevel.ACTIVE,
+                            "standard": UrgencyLevel.STANDARD,
+                            "extended": UrgencyLevel.EXTENDED,
+                        }
+                        urg = urgency_map.get(urgency_level, UrgencyLevel.STANDARD)
+
+                        labels = {
+                            UrgencyLevel.CRITICAL: "CRITIQUE - Agir immediatement",
+                            UrgencyLevel.URGENT: "URGENT - Action prioritaire",
+                            UrgencyLevel.ACTIVE: "ACTIF - Fenetre viable",
+                            UrgencyLevel.STANDARD: "STANDARD - Temps disponible",
+                            UrgencyLevel.EXTENDED: "ETENDU - Pas d'urgence",
+                        }
+
+                        # Build component scores from JSONB or defaults
+                        comp_scores = {}
+                        if component_scores_json and isinstance(component_scores_json, dict):
+                            for name, data in component_scores_json.items():
+                                comp_scores[name] = ComponentScoreModel(
+                                    name=name,
+                                    score=data.get("score", 0),
+                                    max_score=data.get("max_score", 0),
+                                    percentage=data.get("percentage", 0),
+                                )
+
+                        # Build events from JSONB
+                        events = []
+                        if events_json and isinstance(events_json, list):
+                            for ev in events_json:
+                                events.append(EconomicEventModel(
+                                    event_type=ev.get("event_type", "UNKNOWN"),
+                                    thesis=ev.get("thesis", ""),
+                                    confidence=ev.get("confidence", "moderate"),
+                                    urgency=ev.get("urgency", "active"),
+                                ))
+
+                        # Get title from input_data if not in asins table
+                        if not title and input_data_json and isinstance(input_data_json, dict):
+                            title = input_data_json.get("title", f"ASIN {asin}")
+
+                        opp = OpportunityModel(
+                            rank=i,
+                            asin=asin,
+                            title=title or f"ASIN {asin}",
+                            brand=brand,
+                            final_score=int(final_score),
+                            base_score=round(float(base_score), 2),
+                            time_multiplier=round(float(time_multiplier), 2),
+                            estimated_monthly_profit=float(monthly_profit),
+                            estimated_annual_value=float(annual_value),
+                            risk_adjusted_value=float(risk_adjusted),
+                            window_days=int(window_days),
+                            urgency_level=urg,
+                            urgency_label=labels.get(urg, ""),
+                            thesis=thesis or "",
+                            action_recommendation=action_rec or _generate_action_recommendation(window_days),
+                            component_scores=comp_scores,
+                            economic_events=events,
+                            amazon_price=float(amazon_price) if amazon_price else None,
+                            review_count=int(review_count) if review_count else None,
+                            rating=float(rating) if rating else None,
+                            detected_at=scored_at,
+                        )
+                        opportunities.append(opp)
+
+                    logger.info(f"Loaded {len(opportunities)} opportunities from DB")
+                    return opportunities
+            finally:
+                pool.putconn(conn)
+
+        except Exception as e:
+            logger.warning(f"Failed to load DB opportunities: {e}")
+            return []
+
+    def _get_demo_opportunities(self, max_items: int = 25) -> List[OpportunityModel]:
         """Generate demo opportunities for development."""
         demo_products = [
             {
-                "asin": "B09XK7NZQP",
+                "asin": "B08DKHHTFX",
                 "title": "VANMASS Car Phone Mount [Military-Grade Suction]",
                 "brand": "VANMASS",
                 "amazon_price": 29.99,
@@ -362,7 +494,7 @@ class ShortlistService:
                 ],
             },
             {
-                "asin": "B08L5TNJHG",
+                "asin": "B0CHYBKQPM",
                 "title": "Miracase Car Phone Holder Mount",
                 "brand": "Miracase",
                 "amazon_price": 24.99,
@@ -383,7 +515,7 @@ class ShortlistService:
                 ],
             },
             {
-                "asin": "B0BXYZ1234",
+                "asin": "B0CQPJKXVD",
                 "title": "LISEN MagSafe Car Mount [15W Wireless Charging]",
                 "brand": "LISEN",
                 "amazon_price": 34.99,
@@ -404,8 +536,8 @@ class ShortlistService:
                 ],
             },
             {
-                "asin": "B0CDE56789",
-                "title": "andobil Car Phone Holder [2024 Upgraded]",
+                "asin": "B07FY84Y8Y",
+                "title": "andobil Car Phone Holder [2025 Military-Grade]",
                 "brand": "andobil",
                 "amazon_price": 27.99,
                 "review_count": 3892,
@@ -418,8 +550,8 @@ class ShortlistService:
                 "events": [],
             },
             {
-                "asin": "B0FGH78901",
-                "title": "Lamicall Car Vent Phone Mount",
+                "asin": "B09781MJL2",
+                "title": "HTU Ultimate Car Phone Mount [98LBS Suction]",
                 "brand": "Lamicall",
                 "amazon_price": 19.99,
                 "review_count": 15234,

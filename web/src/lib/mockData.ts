@@ -14,7 +14,7 @@ const FIXED_LAST_RUN = '2026-02-04T15:00:00.000Z';
 export const mockOpportunities: Opportunity[] = [
   {
     rank: 1,
-    asin: 'B09XK7NZQP',
+    asin: 'B08DKHHTFX',
     title: 'VANMASS Car Phone Mount [Military-Grade Suction]',
     brand: 'VANMASS',
     finalScore: 82,
@@ -49,7 +49,7 @@ export const mockOpportunities: Opportunity[] = [
   },
   {
     rank: 2,
-    asin: 'B08L5TNJHG',
+    asin: 'B0CHYBKQPM',
     title: 'Miracase Car Phone Holder Mount',
     brand: 'Miracase',
     finalScore: 76,
@@ -84,7 +84,7 @@ export const mockOpportunities: Opportunity[] = [
   },
   {
     rank: 3,
-    asin: 'B0BXYZ1234',
+    asin: 'B0CQPJKXVD',
     title: 'LISEN MagSafe Car Mount [15W Wireless Charging]',
     brand: 'LISEN',
     finalScore: 71,
@@ -119,8 +119,8 @@ export const mockOpportunities: Opportunity[] = [
   },
   {
     rank: 4,
-    asin: 'B0CDE56789',
-    title: 'andobil Car Phone Holder [2024 Upgraded]',
+    asin: 'B07FY84Y8Y',
+    title: 'andobil Car Phone Holder [2025 Military-Grade]',
     brand: 'andobil',
     finalScore: 65,
     baseScore: 0.62,
@@ -146,8 +146,8 @@ export const mockOpportunities: Opportunity[] = [
   },
   {
     rank: 5,
-    asin: 'B0FGH78901',
-    title: 'Lamicall Car Vent Phone Mount',
+    asin: 'B09781MJL2',
+    title: 'HTU Ultimate Car Phone Mount [98LBS Suction]',
     brand: 'Lamicall',
     finalScore: 58,
     baseScore: 0.58,
@@ -179,9 +179,9 @@ export const mockShortlistResponse: ShortlistResponse = {
     count: 5,
     totalPotentialValue: 72912,
     criteria: {
-      minScore: 50,
-      minValue: 5000,
-      maxItems: 5,
+      minScore: 40,
+      minValue: 0,
+      maxItems: 25,
     },
   },
   opportunities: mockOpportunities,

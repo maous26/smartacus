@@ -81,11 +81,16 @@ class KeepaDataNotFoundError(KeepaAPIError):
 
 @dataclass
 class RateLimitState:
-    """Track rate limit state."""
+    """Track rate limit state.
+
+    tokens_per_minute: max burst capacity (bucket size), NOT the refill rate.
+    refill_rate: actual tokens/second from the Keepa plan (e.g. 21/60 = 0.35).
+    The client syncs both values from Keepa API responses after each call.
+    """
     tokens_left: int = 0
-    tokens_per_minute: int = 200
+    tokens_per_minute: int = 200  # bucket size, synced from Keepa response
     last_request_time: Optional[datetime] = None
-    refill_rate: float = 0.0  # tokens per second
+    refill_rate: float = 0.0  # tokens per second, synced from Keepa response
 
     def can_make_request(self, tokens_needed: int) -> bool:
         """Check if we have enough tokens for a request."""
@@ -268,7 +273,7 @@ class KeepaClient:
             try:
                 return func(*args, **kwargs)
 
-            except keepa.KeepaError as e:
+            except Exception as e:
                 last_exception = e
                 error_msg = str(e).lower()
 
@@ -331,83 +336,147 @@ class KeepaClient:
         """Convert Keepa time (minutes since 2011-01-01) to datetime."""
         return self.KEEPA_EPOCH + timedelta(minutes=keepa_minutes)
 
-    def _parse_price_history(self, csv_data: List, price_type: int) -> List[PriceHistory]:
+    def _parse_price_history(self, csv_data, price_type: int) -> List[PriceHistory]:
         """
         Parse Keepa price history CSV data.
 
-        Keepa stores history as flat array: [time1, value1, time2, value2, ...]
+        Handles both:
+        - Raw format: flat array [time1, value1, time2, value2, ...]
+        - keepa lib format: numpy array or DataFrame with datetime/value pairs
 
         Args:
-            csv_data: Keepa CSV array
+            csv_data: Keepa CSV array (raw or numpy)
             price_type: Type of price data
 
         Returns:
             List of PriceHistory objects
         """
-        if csv_data is None or len(csv_data) == 0:
+        if csv_data is None:
             return []
 
         history = []
-        for i in range(0, len(csv_data), 2):
-            if i + 1 >= len(csv_data):
-                break
 
-            keepa_time = csv_data[i]
-            price_cents = csv_data[i + 1]
+        try:
+            import numpy as np
 
-            # Skip invalid entries (-1 = no data)
-            if keepa_time == -1 or price_cents == -1:
-                continue
+            if isinstance(csv_data, np.ndarray):
+                if csv_data.ndim == 2 and csv_data.shape[1] == 2:
+                    for row in csv_data:
+                        ts, val = row[0], row[1]
+                        if np.isnan(val) or val == -1:
+                            continue
+                        # ts is numpy datetime64 — convert to python datetime
+                        try:
+                            if hasattr(ts, 'astype'):
+                                timestamp = ts.astype('datetime64[ms]').astype(datetime)
+                            else:
+                                timestamp = datetime.utcnow()
+                            history.append(PriceHistory(
+                                timestamp=timestamp,
+                                price_cents=int(val),
+                                is_deal=(price_type == self.PRICE_LIGHTNING_DEAL),
+                            ))
+                        except Exception:
+                            continue
+                    return history
+                elif csv_data.ndim == 1:
+                    # Flat numpy array — same as raw format
+                    csv_data = csv_data.tolist()
+        except (ImportError, TypeError, ValueError):
+            pass
 
-            try:
-                timestamp = self._keepa_time_to_datetime(keepa_time)
-                history.append(PriceHistory(
-                    timestamp=timestamp,
-                    price_cents=price_cents,
-                    is_deal=(price_type == self.PRICE_LIGHTNING_DEAL),
-                ))
-            except Exception as e:
-                logger.debug(f"Failed to parse price history entry: {e}")
-                continue
+        # Raw format: [time, value, time, value, ...]
+        try:
+            if len(csv_data) == 0:
+                return []
+            for i in range(0, len(csv_data), 2):
+                if i + 1 >= len(csv_data):
+                    break
+                keepa_time = csv_data[i]
+                price_cents = csv_data[i + 1]
+                if keepa_time == -1 or price_cents == -1:
+                    continue
+                try:
+                    timestamp = self._keepa_time_to_datetime(int(keepa_time))
+                    history.append(PriceHistory(
+                        timestamp=timestamp,
+                        price_cents=int(price_cents),
+                        is_deal=(price_type == self.PRICE_LIGHTNING_DEAL),
+                    ))
+                except Exception:
+                    continue
+        except (TypeError, ValueError):
+            pass
 
         return history
 
-    def _parse_bsr_history(self, csv_data: List, category_name: Optional[str] = None) -> List[BSRHistory]:
+    def _parse_bsr_history(self, csv_data, category_name: Optional[str] = None) -> List[BSRHistory]:
         """
         Parse Keepa BSR history CSV data.
 
+        Handles both raw and numpy array formats.
+
         Args:
-            csv_data: Keepa CSV array
+            csv_data: Keepa CSV array (raw or numpy)
             category_name: Category name for context
 
         Returns:
             List of BSRHistory objects
         """
-        if csv_data is None or len(csv_data) == 0:
+        if csv_data is None:
             return []
 
         history = []
-        for i in range(0, len(csv_data), 2):
-            if i + 1 >= len(csv_data):
-                break
 
-            keepa_time = csv_data[i]
-            bsr = csv_data[i + 1]
+        try:
+            import numpy as np
 
-            # Skip invalid entries
-            if keepa_time == -1 or bsr == -1:
-                continue
+            if isinstance(csv_data, np.ndarray):
+                if csv_data.ndim == 2 and csv_data.shape[1] == 2:
+                    for row in csv_data:
+                        ts, val = row[0], row[1]
+                        if np.isnan(val) or val == -1:
+                            continue
+                        try:
+                            if hasattr(ts, 'astype'):
+                                timestamp = ts.astype('datetime64[ms]').astype(datetime)
+                            else:
+                                timestamp = datetime.utcnow()
+                            history.append(BSRHistory(
+                                timestamp=timestamp,
+                                bsr=int(val),
+                                category_name=category_name,
+                            ))
+                        except Exception:
+                            continue
+                    return history
+                elif csv_data.ndim == 1:
+                    csv_data = csv_data.tolist()
+        except (ImportError, TypeError, ValueError):
+            pass
 
-            try:
-                timestamp = self._keepa_time_to_datetime(keepa_time)
-                history.append(BSRHistory(
-                    timestamp=timestamp,
-                    bsr=bsr,
-                    category_name=category_name,
-                ))
-            except Exception as e:
-                logger.debug(f"Failed to parse BSR history entry: {e}")
-                continue
+        # Raw format
+        try:
+            if len(csv_data) == 0:
+                return []
+            for i in range(0, len(csv_data), 2):
+                if i + 1 >= len(csv_data):
+                    break
+                keepa_time = csv_data[i]
+                bsr = csv_data[i + 1]
+                if keepa_time == -1 or bsr == -1:
+                    continue
+                try:
+                    timestamp = self._keepa_time_to_datetime(int(keepa_time))
+                    history.append(BSRHistory(
+                        timestamp=timestamp,
+                        bsr=int(bsr),
+                        category_name=category_name,
+                    ))
+                except Exception:
+                    continue
+        except (TypeError, ValueError):
+            pass
 
         return history
 
@@ -420,63 +489,106 @@ class KeepaClient:
         elif availability == -1:
             return StockStatus.OUT_OF_STOCK
 
-        # Check if there's a current price (indicates in stock)
+        # Use _extract_latest_value which handles numpy arrays
         csv = product.get("csv", [])
         if csv and len(csv) > self.PRICE_AMAZON:
-            amazon_prices = csv[self.PRICE_AMAZON]
-            if amazon_prices and len(amazon_prices) >= 2:
-                latest_price = amazon_prices[-1]
-                if latest_price > 0:
-                    return StockStatus.IN_STOCK
+            price = self._extract_latest_value(csv[self.PRICE_AMAZON])
+            if price and price > 0:
+                return StockStatus.IN_STOCK
 
-        # Check new offers
         if csv and len(csv) > self.PRICE_COUNT_NEW:
-            new_count = csv[self.PRICE_COUNT_NEW]
-            if new_count and len(new_count) >= 2:
-                latest_count = new_count[-1]
-                if latest_count > 0:
-                    return StockStatus.IN_STOCK
+            count = self._extract_latest_value(csv[self.PRICE_COUNT_NEW])
+            if count and count > 0:
+                return StockStatus.IN_STOCK
 
         return StockStatus.UNKNOWN
 
     def _determine_fulfillment(self, product: Dict) -> FulfillmentType:
         """Determine fulfillment type from Keepa product data."""
-        # Check if Amazon is selling
         csv = product.get("csv", [])
+
+        # Check if Amazon is selling
         if csv and len(csv) > self.PRICE_AMAZON:
-            amazon_prices = csv[self.PRICE_AMAZON]
-            if amazon_prices and len(amazon_prices) >= 2:
-                if amazon_prices[-1] > 0:
-                    return FulfillmentType.AMAZON
+            price = self._extract_latest_value(csv[self.PRICE_AMAZON])
+            if price and price > 0:
+                return FulfillmentType.AMAZON
 
         # Check FBA prices
         if csv and len(csv) > self.PRICE_NEW_FBA:
-            fba_prices = csv[self.PRICE_NEW_FBA]
-            if fba_prices and len(fba_prices) >= 2:
-                if fba_prices[-1] > 0:
-                    return FulfillmentType.FBA
+            price = self._extract_latest_value(csv[self.PRICE_NEW_FBA])
+            if price and price > 0:
+                return FulfillmentType.FBA
 
         # Check FBM prices
         if csv and len(csv) > self.PRICE_NEW_FBM:
-            fbm_prices = csv[self.PRICE_NEW_FBM]
-            if fbm_prices and len(fbm_prices) >= 2:
-                if fbm_prices[-1] > 0:
-                    return FulfillmentType.FBM
+            price = self._extract_latest_value(csv[self.PRICE_NEW_FBM])
+            if price and price > 0:
+                return FulfillmentType.FBM
 
         return FulfillmentType.UNKNOWN
 
-    def _extract_latest_value(self, csv_data: List) -> Optional[int]:
-        """Extract the latest value from Keepa CSV data array."""
-        if csv_data is None or len(csv_data) < 2:
+    def _extract_latest_value(self, csv_data) -> Optional[int]:
+        """Extract the latest value from Keepa CSV data array.
+
+        Handles both raw arrays (time, value, time, value, ...) and
+        numpy arrays from the keepa library's to_datetime conversion.
+        """
+        if csv_data is None:
             return None
 
-        # Get the last value (skip -1 which means no data)
-        for i in range(len(csv_data) - 1, 0, -2):
-            value = csv_data[i]
-            if value != -1:
-                return value
+        try:
+            import numpy as np
+
+            # keepa lib with to_datetime=True returns numpy arrays with shape (N, 2)
+            # or flat arrays. Handle both.
+            if isinstance(csv_data, np.ndarray):
+                if csv_data.ndim == 2 and csv_data.shape[1] == 2:
+                    # Shape (N, 2): column 0 = datetime, column 1 = value
+                    for i in range(csv_data.shape[0] - 1, -1, -1):
+                        val = csv_data[i, 1]
+                        if not np.isnan(val) and val != -1:
+                            return int(val)
+                    return None
+                elif csv_data.ndim == 1:
+                    # Flat array — interleaved time, value pairs
+                    for i in range(len(csv_data) - 1, 0, -2):
+                        val = csv_data[i]
+                        if not np.isnan(val) and val != -1:
+                            return int(val)
+                    return None
+        except (ImportError, TypeError, ValueError):
+            pass
+
+        # Fallback: raw list format [time, value, time, value, ...]
+        try:
+            if len(csv_data) < 2:
+                return None
+            for i in range(len(csv_data) - 1, 0, -2):
+                value = csv_data[i]
+                if value is not None and value != -1:
+                    return int(value)
+        except (TypeError, ValueError):
+            pass
 
         return None
+
+    @staticmethod
+    def _extract_stats_value(stats, *keys):
+        """Safely extract a nested value from Keepa stats dict.
+
+        Stats may contain lists or dicts; this handles both gracefully.
+        Returns None if any level is not a dict.
+        """
+        current = stats
+        for key in keys:
+            if isinstance(current, dict):
+                current = current.get(key)
+            else:
+                return None
+        # Don't return list/dict values, only scalars
+        if isinstance(current, (list, dict)):
+            return None
+        return current
 
     def _transform_product(self, product: Dict) -> ProductData:
         """
@@ -491,6 +603,9 @@ class KeepaClient:
         asin = product.get("asin", "")
         csv = product.get("csv", [])
         stats = product.get("stats", {})
+        # keepa lib may return stats as list or None — normalize to dict
+        if not isinstance(stats, dict):
+            stats = {}
 
         # Extract current prices
         price_amazon = None
@@ -519,8 +634,12 @@ class KeepaClient:
 
         # Get category info
         categories = product.get("categoryTree", [])
-        if categories:
-            bsr_category = categories[-1].get("name") if categories else None
+        if categories and isinstance(categories, list) and len(categories) > 0:
+            last_cat = categories[-1]
+            if isinstance(last_cat, dict):
+                bsr_category = last_cat.get("name")
+            elif isinstance(last_cat, str):
+                bsr_category = last_cat
 
         # Extract rating and reviews
         rating_avg = None
@@ -553,19 +672,19 @@ class KeepaClient:
             seller_count=seller_count,
             rating_average=rating_avg,
             review_count=review_count,
-            rating_count=stats.get("current", {}).get("COUNT_REVIEWS") if stats else None,
+            rating_count=self._extract_stats_value(stats, "current", "COUNT_REVIEWS"),
             data_source="keepa",
         )
 
         # Create metadata
         metadata = ProductMetadata(
             asin=asin,
-            title=product.get("title", "Unknown"),
+            title=product.get("title") or f"[No Title] {asin}",
             brand=product.get("brand"),
             manufacturer=product.get("manufacturer"),
             model_number=product.get("model"),
             category_id=product.get("rootCategory"),
-            category_path=[c.get("name") for c in categories] if categories else None,
+            category_path=[c.get("name") if isinstance(c, dict) else str(c) for c in categories] if categories else None,
             main_image_url=f"https://images-na.ssl-images-amazon.com/images/I/{product.get('imagesCSV', '').split(',')[0]}" if product.get("imagesCSV") else None,
             is_amazon_choice=product.get("isAmazonChoice", False),
             is_best_seller=product.get("isBestSeller", False),
@@ -575,17 +694,29 @@ class KeepaClient:
         price_history = None
         bsr_history = None
 
+        def _csv_has_data(idx):
+            """Check if csv[idx] has data (handles numpy arrays)."""
+            if not csv or len(csv) <= idx:
+                return False
+            entry = csv[idx]
+            if entry is None:
+                return False
+            try:
+                return len(entry) > 0
+            except TypeError:
+                return False
+
         if csv:
             # Use BuyBox price history if available, else Amazon, else New
-            if len(csv) > self.PRICE_BUYBOX_NEW and csv[self.PRICE_BUYBOX_NEW]:
+            if _csv_has_data(self.PRICE_BUYBOX_NEW):
                 price_history = self._parse_price_history(csv[self.PRICE_BUYBOX_NEW], self.PRICE_BUYBOX_NEW)
-            elif len(csv) > self.PRICE_AMAZON and csv[self.PRICE_AMAZON]:
+            elif _csv_has_data(self.PRICE_AMAZON):
                 price_history = self._parse_price_history(csv[self.PRICE_AMAZON], self.PRICE_AMAZON)
-            elif len(csv) > self.PRICE_NEW and csv[self.PRICE_NEW]:
+            elif _csv_has_data(self.PRICE_NEW):
                 price_history = self._parse_price_history(csv[self.PRICE_NEW], self.PRICE_NEW)
 
             # BSR history
-            if len(csv) > self.PRICE_SALES_RANK and csv[self.PRICE_SALES_RANK]:
+            if _csv_has_data(self.PRICE_SALES_RANK):
                 bsr_history = self._parse_bsr_history(csv[self.PRICE_SALES_RANK], bsr_category)
 
         return ProductData(
@@ -617,26 +748,30 @@ class KeepaClient:
         max_results: Optional[int] = None,
     ) -> List[str]:
         """
-        Get all ASINs in a category.
+        Get ASINs in a category using best_sellers_query.
 
         Args:
             category_node_id: Amazon browse node ID
-            include_children: Include child categories
+            include_children: (unused, kept for API compat)
             max_results: Maximum ASINs to return (None = all)
 
         Returns:
             List of ASIN strings
 
         Note:
-            This operation costs approximately 1 token per 1,000 ASINs.
+            Uses best_sellers_query which returns up to 100k ASINs for
+            root categories, 3k for sub-categories. Ordered by sales rank.
         """
-        logger.info(f"Fetching ASINs for category {category_node_id}")
+        logger.info(f"Fetching best sellers for category {category_node_id}")
+
+        domain_map = {1: 'US', 2: 'UK', 3: 'DE', 4: 'FR', 5: 'JP', 6: 'CA',
+                      7: 'CN', 8: 'IT', 9: 'ES', 10: 'IN', 11: 'MX'}
+        domain_str = domain_map.get(self.domain_id, 'FR')
 
         def _fetch():
-            return self.api.category_lookup(
-                category_node_id,
-                domain=self.domain_id,
-                include_child_categories=include_children,
+            return self.api.best_sellers_query(
+                str(category_node_id),
+                domain=domain_str,
             )
 
         try:
@@ -649,15 +784,8 @@ class KeepaClient:
                 logger.warning(f"No data returned for category {category_node_id}")
                 return []
 
-            # Extract ASINs from result
-            asins = []
-            if isinstance(result, dict):
-                # Category lookup returns dict with category info
-                asin_list = result.get("asinList", [])
-                if asin_list:
-                    asins = asin_list
-            elif isinstance(result, list):
-                asins = result
+            # best_sellers_query returns a list of ASINs
+            asins = result if isinstance(result, list) else []
 
             # Track tokens consumed (estimate)
             tokens_consumed = max(1, len(asins) // 1000)
@@ -672,7 +800,7 @@ class KeepaClient:
 
         except Exception as e:
             logger.error(f"Failed to fetch category ASINs: {e}")
-            raise KeepaAPIError(f"Category lookup failed: {e}")
+            raise KeepaAPIError(f"Best sellers query failed: {e}")
 
     def get_product_data(
         self,
@@ -731,17 +859,24 @@ class KeepaClient:
 
         estimated_tokens = len(asins) * tokens_per_asin
 
+        # Map numeric domain ID to string for keepa library
+        domain_map = {1: 'US', 2: 'UK', 3: 'DE', 4: 'FR', 5: 'JP', 6: 'CA',
+                      7: 'CN', 8: 'IT', 9: 'ES', 10: 'IN', 11: 'MX'}
+        domain_str = domain_map.get(self.domain_id, 'US')
+
         def _fetch():
-            return self.api.query(
-                asins,
-                domain=self.domain_id,
-                history=include_history,
-                days=history_days if include_history else 0,
-                buybox=include_buybox,
-                offers=50 if include_offers else 0,  # Get up to 50 offers
-                rating=True,
-                stats=30,  # Get 30-day stats
-            )
+            kwargs = {
+                "domain": domain_str,
+                "history": include_history,
+                "buybox": include_buybox,
+                "rating": True,
+                "stats": 30,  # Get 30-day stats
+            }
+            if include_history and history_days:
+                kwargs["days"] = history_days
+            if include_offers:
+                kwargs["offers"] = 50
+            return self.api.query(asins, **kwargs)
 
         try:
             self._wait_for_rate_limit(estimated_tokens)
