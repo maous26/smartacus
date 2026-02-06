@@ -268,19 +268,74 @@ class EconomicScorer:
             factors=factors,
         )
 
+    def get_best_quote_cogs(self, asin: str) -> Optional[Tuple[float, float]]:
+        """
+        Get best COGS from sourcing_quotes table if available.
+
+        Returns:
+            (unit_price_usd, shipping_cost_usd) or None if no valid quote
+        """
+        try:
+            import os
+            import psycopg2
+
+            conn = psycopg2.connect(
+                host=os.getenv("DATABASE_HOST", "localhost"),
+                port=int(os.getenv("DATABASE_PORT", "5432")),
+                dbname=os.getenv("DATABASE_NAME", "smartacus"),
+                user=os.getenv("DATABASE_USER", "postgres"),
+                password=os.getenv("DATABASE_PASSWORD", ""),
+                sslmode=os.getenv("DATABASE_SSL_MODE", "prefer"),
+                connect_timeout=5,
+            )
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT unit_price_usd, shipping_cost_usd
+                        FROM sourcing_quotes
+                        WHERE asin = %s
+                          AND is_active = true
+                          AND (valid_until IS NULL OR valid_until > NOW())
+                          AND unit_price_usd IS NOT NULL
+                        ORDER BY unit_price_usd ASC
+                        LIMIT 1
+                    """, (asin,))
+                    row = cur.fetchone()
+                    if row:
+                        unit_price = float(row[0]) if row[0] else None
+                        shipping = float(row[1]) if row[1] else 0.0
+                        if unit_price:
+                            return (unit_price, shipping)
+            finally:
+                conn.close()
+        except Exception:
+            pass  # Silently fallback to heuristic
+        return None
+
     def estimate_economic_value(
         self,
         amazon_price: float,
         estimated_cogs: float,
         estimated_monthly_units: int,
         risk_factor: float = 0.3,  # 30% de réduction pour risque
+        asin: Optional[str] = None,  # V2.0: optional ASIN to lookup real quotes
     ) -> Tuple[Decimal, Decimal, Decimal]:
         """
         Estime la valeur économique de l'opportunité.
 
+        V2.0 Enhancement: If asin is provided, attempts to use real sourcing quotes
+        from the database instead of the heuristic estimated_cogs.
+
         Returns:
             (monthly_profit, annual_value, risk_adjusted_value)
         """
+        # V2.0: Try to get real COGS from sourcing_quotes
+        actual_cogs = estimated_cogs
+        if asin:
+            quote_data = self.get_best_quote_cogs(asin)
+            if quote_data:
+                actual_cogs = quote_data[0] + quote_data[1]  # unit_price + shipping
+
         # Coûts complets
         fba_fees = max(amazon_price * 0.15, 3.0)
         referral = amazon_price * 0.15
@@ -288,7 +343,7 @@ class EconomicScorer:
         return_provision = amazon_price * 0.05
 
         total_cost_per_unit = (
-            estimated_cogs +
+            actual_cogs +
             fba_fees +
             referral +
             ppc_provision +
@@ -359,8 +414,9 @@ class EconomicScorer:
 
         monthly_profit, annual_value, risk_adjusted = self.estimate_economic_value(
             amazon_price=amazon_price,
-            estimated_cogs=alibaba_price + 3,  # +3$ shipping
+            estimated_cogs=alibaba_price + 3,  # +3$ shipping (fallback heuristic)
             estimated_monthly_units=estimated_units,
+            asin=asin,  # V2.0: pass ASIN to lookup real quotes
         )
 
         # === 5. SCORE DE RANKING ===

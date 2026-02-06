@@ -381,6 +381,34 @@ class ShortlistService:
                     if not rows:
                         return []
 
+                    # Collect all ASINs to fetch economic events
+                    asins = [row[0] for row in rows]
+
+                    # Fetch recent economic events (< 7 days) for these ASINs
+                    asin_events = {}
+                    try:
+                        cur.execute("""
+                            SELECT asin, event_type, event_subtype, confidence, urgency, thesis, detected_at
+                            FROM economic_events
+                            WHERE asin = ANY(%s)
+                              AND detected_at > NOW() - INTERVAL '7 days'
+                            ORDER BY detected_at DESC
+                        """, (asins,))
+                        for ev_row in cur.fetchall():
+                            ev_asin = ev_row[0]
+                            if ev_asin not in asin_events:
+                                asin_events[ev_asin] = []
+                            asin_events[ev_asin].append({
+                                "event_type": ev_row[1],
+                                "event_subtype": ev_row[2],
+                                "confidence": float(ev_row[3]) if ev_row[3] else 0.5,
+                                "urgency": ev_row[4],  # Already a string from enum
+                                "thesis": ev_row[5],
+                                "detected_at": ev_row[6].isoformat() if ev_row[6] else None,
+                            })
+                    except Exception as e:
+                        logger.debug(f"Could not fetch economic_events (table may not exist): {e}")
+
                     opportunities = []
                     for i, row in enumerate(rows, 1):
                         (asin, rank, final_score, base_score, time_multiplier,
@@ -420,9 +448,20 @@ class ShortlistService:
                                     percentage=data.get("percentage", 0),
                                 )
 
-                        # Build events from JSONB
+                        # Build events: prefer from economic_events table, fallback to JSONB
                         events = []
-                        if events_json and isinstance(events_json, list):
+                        if asin in asin_events:
+                            for ev in asin_events[asin]:
+                                # Map confidence float to string
+                                conf_str = "weak" if ev["confidence"] < 0.5 else "moderate" if ev["confidence"] < 0.7 else "strong"
+                                events.append(EconomicEventModel(
+                                    event_type=ev.get("event_type", "UNKNOWN"),
+                                    thesis=ev.get("thesis", ""),
+                                    confidence=conf_str,
+                                    urgency=ev.get("urgency", "MEDIUM").lower(),
+                                ))
+                        elif events_json and isinstance(events_json, list):
+                            # Fallback to JSONB in artifacts
                             for ev in events_json:
                                 events.append(EconomicEventModel(
                                     event_type=ev.get("event_type", "UNKNOWN"),
@@ -460,7 +499,7 @@ class ShortlistService:
                         )
                         opportunities.append(opp)
 
-                    logger.info(f"Loaded {len(opportunities)} opportunities from DB")
+                    logger.info(f"Loaded {len(opportunities)} opportunities from DB (with {sum(len(v) for v in asin_events.values())} economic events)")
                     return opportunities
             finally:
                 pool.putconn(conn)

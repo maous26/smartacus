@@ -42,6 +42,7 @@ from .ai_routes import router as ai_router
 from .rag_routes import router as rag_router
 from .spec_routes import router as spec_router
 from .review_routes import router as review_router
+from .sourcing_routes import router as sourcing_router
 from . import db
 
 # Configure logging
@@ -116,6 +117,9 @@ app.include_router(spec_router)
 
 # Include Review Intelligence routes
 app.include_router(review_router)
+
+# Include Sourcing routes
+app.include_router(sourcing_router)
 
 
 # ============================================================================

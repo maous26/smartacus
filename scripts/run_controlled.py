@@ -32,6 +32,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+import hashlib
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -699,6 +700,117 @@ def run_controlled(
             except Exception as e:
                 audit.warn(f"Review intelligence failed (non-blocking): {e}")
 
+        # --- Step 6e: Economic Event Detection (V2.0) ---
+        with audit.time_phase("event_detection"):
+            try:
+                from src.events.economic_events import EconomicEventDetector
+
+                detector = EconomicEventDetector()
+                pool = db.get_pool()
+                conn = pool.getconn()
+                try:
+                    events_detected = 0
+                    events_inserted = 0
+
+                    for product in products:
+                        asin = product.asin
+                        snap = product.current_snapshot
+
+                        # Build metrics dict for detector
+                        time_signals = compute_time_signals(product)
+
+                        # Get review data if available (from review_improvement_profiles)
+                        negative_pct = 0.10  # Default
+                        wish_mentions = 0
+                        common_complaints = []
+                        rating_now = float(snap.rating) if snap.rating else 4.0
+                        rating_30d_ago = rating_now  # No historical data yet
+
+                        try:
+                            with conn.cursor() as cur:
+                                cur.execute("""
+                                    SELECT top_defects, missing_features, improvement_score
+                                    FROM review_improvement_profiles
+                                    WHERE asin = %s
+                                    ORDER BY computed_at DESC LIMIT 1
+                                """, (asin,))
+                                prof = cur.fetchone()
+                                if prof:
+                                    defects_raw = prof[0] if isinstance(prof[0], list) else json.loads(prof[0] or "[]")
+                                    features_raw = prof[1] if isinstance(prof[1], list) else json.loads(prof[1] or "[]")
+                                    negative_pct = min(0.5, len(defects_raw) * 0.05 + 0.05) if defects_raw else 0.10
+                                    wish_mentions = sum(f.get("mentions", 0) for f in features_raw)
+                                    common_complaints = [d.get("type", "") for d in defects_raw[:5]]
+                        except Exception:
+                            pass  # Use defaults
+
+                        metrics = {
+                            # Supply shock signals
+                            "stockouts_90d": int(time_signals.get("stockout_frequency", 0) * 3),
+                            "bsr_change_30d": -time_signals.get("bsr_acceleration", 0),  # Invert (acceleration = improvement)
+                            "price_change_30d": 0.0,  # Would need history comparison
+                            "competitors_stockout": 0,  # Not available from Keepa
+
+                            # Competitor collapse signals
+                            "seller_churn_90d": time_signals.get("seller_churn_90d", 0),
+                            "top_seller_gone": False,  # Would need historical seller data
+                            "buybox_rotation_change": 0.0,  # Not available
+                            "new_entrants": 0,  # Not available
+
+                            # Quality decay signals
+                            "negative_review_pct": negative_pct,
+                            "negative_review_trend": 0.0,  # Would need historical review data
+                            "wish_mentions": wish_mentions,
+                            "common_complaints": common_complaints,
+                            "rating_30d_ago": rating_30d_ago,
+                            "rating_now": rating_now,
+                        }
+
+                        # Detect events
+                        detected = detector.detect_all_events(asin, metrics)
+                        events_detected += len(detected)
+
+                        # Insert into economic_events table (with fingerprint dedup)
+                        for event in detected:
+                            # Generate fingerprint from signals
+                            signals_json = json.dumps(event.supporting_signals, sort_keys=True)
+                            fingerprint = hashlib.sha256(signals_json.encode()).hexdigest()[:16]
+
+                            try:
+                                with conn.cursor() as cur:
+                                    cur.execute("""
+                                        INSERT INTO economic_events (
+                                            asin, event_type, event_subtype, confidence, urgency,
+                                            thesis, signals, event_fingerprint, run_id
+                                        ) VALUES (%s, %s, %s, %s, %s::event_urgency, %s, %s, %s, %s)
+                                        ON CONFLICT (asin, event_type, event_fingerprint) DO NOTHING
+                                    """, (
+                                        asin,
+                                        event.event_type.value.upper(),
+                                        getattr(event, 'event_subtype', None),
+                                        event.signal_strength,  # Use signal_strength as confidence 0-1
+                                        event.urgency.value.upper(),
+                                        event.thesis,
+                                        json.dumps(event.supporting_signals),
+                                        fingerprint,
+                                        pipeline_run_id,
+                                    ))
+                                    if cur.rowcount > 0:
+                                        events_inserted += 1
+                            except Exception as e:
+                                logger.debug(f"Event insert skipped for {asin}: {e}")
+
+                    conn.commit()
+                    print(f"  Event Detection: {events_detected} detected, {events_inserted} new inserted")
+                    audit.record_count("events_detected", events_detected)
+                    audit.record_count("events_inserted", events_inserted)
+                finally:
+                    pool.putconn(conn)
+            except ImportError as e:
+                print(f"  Event Detection: SKIP (module not available: {e})")
+            except Exception as e:
+                audit.warn(f"Event detection failed (non-blocking): {e}")
+
         # --- Step 6d: Spec Generation (conditional) ---
         with audit.time_phase("spec_generation"):
             try:
@@ -790,6 +902,182 @@ def run_controlled(
                 print(f"  Spec Generation: SKIP (module not available)")
             except Exception as e:
                 audit.warn(f"Spec generation failed (non-blocking): {e}")
+
+        # --- Step 6f: Auto-thesis generation (V2.0) ---
+        with audit.time_phase("thesis_generation"):
+            try:
+                # Config from env
+                max_theses = int(os.getenv("MAX_THESES_PER_RUN", "20"))
+                cache_days = int(os.getenv("THESIS_CACHE_DAYS", "7"))
+
+                pool = db.get_pool()
+                conn = pool.getconn()
+                try:
+                    theses_generated = 0
+                    theses_cached = 0
+
+                    # Get top opportunities by score (>= 50)
+                    eligible = [opp for opp in scored if opp.get("final_score", 0) >= 50 and opp.get("is_valid", True)]
+                    eligible = eligible[:max_theses]
+
+                    for opp in eligible:
+                        asin = opp["asin"]
+
+                        # Check cache: skip if recent thesis exists
+                        with conn.cursor() as cur:
+                            cur.execute("""
+                                SELECT 1 FROM opportunity_theses
+                                WHERE asin = %s AND generated_at > NOW() - INTERVAL '%s days'
+                                LIMIT 1
+                            """, (asin, cache_days))
+                            if cur.fetchone():
+                                theses_cached += 1
+                                continue
+
+                        # Generate thesis
+                        headline = f"Score {opp['final_score']} | {opp.get('urgency', 'standard').upper()} | {opp['window_days']}j"
+                        thesis = opp.get("thesis", "")
+
+                        # Build economic estimates JSON
+                        economic_estimates = {
+                            "monthly_profit": opp.get("monthly_profit", 0),
+                            "annual_value": opp.get("annual_value", 0),
+                            "risk_adjusted_value": opp.get("risk_adjusted_value", 0),
+                            "amazon_price": opp.get("price"),
+                            "base_score": opp.get("base_score", 0),
+                            "time_multiplier": opp.get("time_multiplier", 1.0),
+                        }
+
+                        # Get associated events
+                        source_events = []
+                        with conn.cursor() as cur:
+                            cur.execute("""
+                                SELECT event_type, thesis, urgency
+                                FROM economic_events
+                                WHERE asin = %s AND detected_at > NOW() - INTERVAL '7 days'
+                            """, (asin,))
+                            for ev_row in cur.fetchall():
+                                source_events.append({
+                                    "event_type": ev_row[0],
+                                    "thesis": ev_row[1],
+                                    "urgency": ev_row[2],
+                                })
+
+                        # Save thesis
+                        with conn.cursor() as cur:
+                            cur.execute("""
+                                INSERT INTO opportunity_theses (
+                                    asin, run_id, headline, thesis, confidence,
+                                    action_recommendation, urgency, economic_estimates,
+                                    source_events
+                                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                ON CONFLICT (asin, run_id) DO NOTHING
+                            """, (
+                                asin, pipeline_run_id, headline, thesis,
+                                opp.get("base_score", 0.5),
+                                _generate_action(opp["window_days"]),
+                                opp.get("urgency", "standard").upper(),
+                                json.dumps(economic_estimates),
+                                json.dumps(source_events),
+                            ))
+                            if cur.rowcount > 0:
+                                theses_generated += 1
+
+                    conn.commit()
+                    print(f"  Thesis Generation: {theses_generated} generated, {theses_cached} cached (skip)")
+                    audit.record_count("theses_generated", theses_generated)
+                    audit.record_count("theses_cached", theses_cached)
+                finally:
+                    pool.putconn(conn)
+            except Exception as e:
+                audit.warn(f"Thesis generation failed (non-blocking): {e}")
+
+        # --- Step 6g: Slack Notifications (V2.0) ---
+        with audit.time_phase("notifications"):
+            try:
+                from src.notifications import SlackNotifier
+                notifier = SlackNotifier()
+
+                if not notifier.is_configured():
+                    print(f"  Notifications: SKIP (not configured)")
+                else:
+                    # Determine "new" opportunities to notify
+                    # Criteria: score >= 50 AND (new ASIN OR critical event OR score +10)
+                    to_notify = []
+
+                    pool = db.get_pool()
+                    conn = pool.getconn()
+                    try:
+                        for opp in scored[:20]:  # Top 20 max
+                            if opp.get("final_score", 0) < 50 or not opp.get("is_valid", True):
+                                continue
+
+                            asin = opp["asin"]
+                            reasons = []
+
+                            # Check if new ASIN (first seen)
+                            with conn.cursor() as cur:
+                                cur.execute("""
+                                    SELECT COUNT(*) FROM opportunity_artifacts
+                                    WHERE asin = %s AND run_id != %s
+                                """, (asin, pipeline_run_id))
+                                prev_count = cur.fetchone()[0]
+                                if prev_count == 0:
+                                    reasons.append("Nouvel ASIN")
+
+                            # Check for critical/high event
+                            with conn.cursor() as cur:
+                                cur.execute("""
+                                    SELECT event_type, urgency FROM economic_events
+                                    WHERE asin = %s AND detected_at > NOW() - INTERVAL '24 hours'
+                                      AND urgency IN ('CRITICAL', 'HIGH')
+                                    LIMIT 1
+                                """, (asin,))
+                                ev = cur.fetchone()
+                                if ev:
+                                    reasons.append(f"Event {ev[1]}: {ev[0]}")
+
+                            # Check score increase (>= +10)
+                            with conn.cursor() as cur:
+                                cur.execute("""
+                                    SELECT final_score FROM opportunity_artifacts
+                                    WHERE asin = %s AND run_id != %s
+                                    ORDER BY scored_at DESC LIMIT 1
+                                """, (asin, pipeline_run_id))
+                                prev_row = cur.fetchone()
+                                if prev_row:
+                                    prev_score = prev_row[0] or 0
+                                    if opp["final_score"] - prev_score >= 10:
+                                        reasons.append(f"Score +{opp['final_score'] - prev_score}")
+
+                            if reasons:
+                                to_notify.append({
+                                    "asin": asin,
+                                    "title": opp.get("title", "")[:40],
+                                    "final_score": opp["final_score"],
+                                    "window_days": opp["window_days"],
+                                    "annual_value": opp.get("annual_value", 0),
+                                    "urgency": opp.get("urgency", "standard").upper(),
+                                    "reason": " | ".join(reasons),
+                                })
+                    finally:
+                        pool.putconn(conn)
+
+                    if to_notify:
+                        success = notifier.notify_new_opportunities(
+                            opportunities=to_notify,
+                            run_id=pipeline_run_id,
+                        )
+                        print(f"  Notifications: {len(to_notify)} opportunities {'sent' if success else 'FAILED'}")
+                        audit.record_count("notifications_sent", len(to_notify) if success else 0)
+                    else:
+                        print(f"  Notifications: No new opportunities to notify")
+                        audit.record_count("notifications_sent", 0)
+
+            except ImportError:
+                print(f"  Notifications: SKIP (module not available)")
+            except Exception as e:
+                audit.warn(f"Notifications failed (non-blocking): {e}")
 
         # --- Step 7: Refresh materialized views ---
         with audit.time_phase("refresh_views"):

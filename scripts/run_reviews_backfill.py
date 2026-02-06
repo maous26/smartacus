@@ -7,7 +7,8 @@ Fetches individual Amazon reviews for top opportunity ASINs and populates
 the `reviews` table. Then triggers review intelligence analysis.
 
 Data sources (--source):
-    playwright  : headless Chromium browser (default, bypasses anti-bot)
+    oxylabs     : Oxylabs SERP Scraper API (recommended, 7-10 reviews per ASIN)
+    playwright  : headless Chromium browser (bypasses anti-bot, often blocked)
     csv         : import from local CSV file (for testing or external data)
 
 NOT Keepa — Keepa only provides aggregated rating/count history, not review text.
@@ -76,8 +77,9 @@ logger = logging.getLogger(__name__)
 class BackfillConfig:
     """Backfill job configuration."""
     # Data source
-    source: str = "playwright"             # "playwright" or "csv"
+    source: str = "oxylabs"                # "oxylabs", "playwright", or "csv"
     csv_file: Optional[str] = None         # path to CSV file for csv source
+    amazon_domain: str = "fr"              # Amazon domain for oxylabs (fr, com, de, etc.)
 
     # Target selection
     top_n: int = 20                        # top N ASINs by score
@@ -123,6 +125,54 @@ class ScrapedReview:
         if not self.content_hash:
             text = f"{self.title or ''}{self.body or ''}"
             self.content_hash = hashlib.sha256(text.encode()).hexdigest()
+
+
+# ============================================================================
+# SOURCE: OXYLABS API
+# ============================================================================
+
+def fetch_reviews_oxylabs(asin: str, config: BackfillConfig) -> List[ScrapedReview]:
+    """
+    Fetch reviews using Oxylabs SERP Scraper API.
+
+    Returns 7-10 "Top reviews" per ASIN (Oxylabs limitation).
+    All reviews are returned (not filtered by rating) to capture:
+    - Negative reviews for defect detection
+    - Positive reviews for "I wish..." patterns
+    """
+    try:
+        from src.data.oxylabs_client import OxylabsClient, OxylabsError
+
+        client = OxylabsClient()
+        reviews = client.fetch_product_reviews(
+            asin=asin,
+            domain=config.amazon_domain,
+            max_reviews=config.max_reviews_per_asin,
+        )
+
+        # Convert OxylabsClient.Review to ScrapedReview
+        scraped = []
+        for r in reviews:
+            scraped.append(ScrapedReview(
+                review_id=r.review_id,
+                asin=r.asin,
+                title=r.title,
+                body=r.content,
+                rating=float(r.rating),
+                author_name=r.author,
+                review_date=r.date.strftime("%Y-%m-%d") if r.date else None,
+                is_verified_purchase=r.verified_purchase,
+                helpful_votes=r.helpful_votes,
+            ))
+
+        return scraped
+
+    except ImportError as e:
+        logger.error(f"Oxylabs client not available: {e}")
+        return []
+    except Exception as e:
+        logger.error(f"Oxylabs fetch failed for {asin}: {e}")
+        return []
 
 
 # ============================================================================
@@ -598,7 +648,7 @@ def run_backfill(config: BackfillConfig) -> BackfillResult:
                 print(f"  {result.asins_analyzed} ASINs analyzed")
 
         else:
-            # Playwright mode: target top ASINs
+            # Oxylabs or Playwright mode: target top ASINs
             all_asins = get_target_asins(conn, config)
             result.asins_targeted = len(all_asins)
             print(f"\n  Target ASINs: {len(all_asins)}")
@@ -626,8 +676,15 @@ def run_backfill(config: BackfillConfig) -> BackfillResult:
                 conn.close()
                 return result
 
-            # Fetch reviews with Playwright
-            print(f"\n--- Fetching Reviews (Playwright) ---")
+            # Select fetch function based on source
+            if config.source == "oxylabs":
+                fetch_func = fetch_reviews_oxylabs
+                source_label = "Oxylabs"
+            else:
+                fetch_func = fetch_reviews_playwright
+                source_label = "Playwright"
+
+            print(f"\n--- Fetching Reviews ({source_label}) ---")
             total_fetched = 0
 
             for i, asin in enumerate(asins_to_fetch, 1):
@@ -638,10 +695,13 @@ def run_backfill(config: BackfillConfig) -> BackfillResult:
                 print(f"  [{i}/{len(asins_to_fetch)}] {asin}...", end="", flush=True)
 
                 try:
-                    reviews = fetch_reviews_playwright(asin, config)
+                    reviews = fetch_func(asin, config)
 
                     if not reviews:
-                        print(f" 0 reviews (captcha/blocked)")
+                        if config.source == "oxylabs":
+                            print(f" 0 reviews (no reviews returned)")
+                        else:
+                            print(f" 0 reviews (captcha/blocked)")
                         result.asins_failed += 1
                         result.errors.append(f"{asin}: no reviews fetched")
                         continue
@@ -661,9 +721,12 @@ def run_backfill(config: BackfillConfig) -> BackfillResult:
                         f"~{save_stats['updated']} upd)"
                     )
 
-                    # Inter-ASIN delay
+                    # Inter-ASIN delay (shorter for Oxylabs as it has built-in rate limiting)
                     if i < len(asins_to_fetch):
-                        delay = random.uniform(config.max_delay_sec, config.max_delay_sec * 2)
+                        if config.source == "oxylabs":
+                            delay = 1.0  # Oxylabs client handles its own rate limiting
+                        else:
+                            delay = random.uniform(config.max_delay_sec, config.max_delay_sec * 2)
                         time.sleep(delay)
 
                 except Exception as e:
@@ -731,12 +794,16 @@ def main():
         description="Backfill Amazon reviews for top opportunity ASINs"
     )
     parser.add_argument(
-        "--source", choices=["playwright", "csv"], default="playwright",
-        help="Data source: playwright (headless browser) or csv (file import)"
+        "--source", choices=["oxylabs", "playwright", "csv"], default="oxylabs",
+        help="Data source: oxylabs (API, recommended), playwright (headless browser), or csv (file import)"
     )
     parser.add_argument(
         "--csv-file", type=str,
         help="Path to CSV file (required for --source csv)"
+    )
+    parser.add_argument(
+        "--domain", type=str, default="fr",
+        help="Amazon domain for oxylabs source (default: fr). Options: fr, com, de, uk, etc."
     )
     parser.add_argument(
         "--top-n", type=int, default=20,
@@ -790,6 +857,7 @@ def main():
     config = BackfillConfig(
         source=args.source,
         csv_file=args.csv_file,
+        amazon_domain=args.domain,
         top_n=args.top_n,
         asins=[a.strip() for a in args.asins.split(",") if a.strip()] if args.asins else [],
         max_reviews_per_asin=args.max_reviews_per_asin,
