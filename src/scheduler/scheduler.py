@@ -1,11 +1,12 @@
 """
-Smart Scheduler
-===============
+Smart Scheduler V3.0
+====================
 
 Intelligent pipeline scheduling with:
 - Monthly token budget management
 - Multi-category support with auto-selection
 - Performance-based prioritization
+- **V3.0**: Strategy Agent for intelligent resource allocation
 - Configurable run frequency
 
 Usage:
@@ -16,11 +17,13 @@ Usage:
 CLI:
     python -m src.scheduler.scheduler --run-once
     python -m src.scheduler.scheduler --daemon
+    python -m src.scheduler.scheduler --strategy  # Show strategy decision
 """
 
 import os
 import sys
 import time
+import json
 import logging
 import argparse
 from datetime import datetime, timedelta
@@ -29,6 +32,7 @@ from dataclasses import dataclass
 
 from .token_budget import TokenBudgetManager, BudgetStatus
 from .category_discovery import CategoryDiscovery, CategoryInfo
+from .strategy_agent import StrategyAgent, NicheMetrics, NicheStatus, load_niche_metrics_from_db
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +48,8 @@ class SchedulerConfig:
     discovery_enabled: bool = True
     discovery_depth: int = 2
     target_domains: List[str] = None
+    use_strategy_agent: bool = True   # V3.0: Enable intelligent allocation
+    enable_llm_consultation: bool = False  # V3.0: LLM for ambiguous cases
 
     def __post_init__(self):
         if self.target_domains is None:
@@ -85,6 +91,12 @@ class SmartScheduler:
         self.config = config or self._load_config()
         self.budget_manager = TokenBudgetManager()
         self.category_discovery = CategoryDiscovery()
+
+        # V3.0: Strategy Agent for intelligent allocation
+        self.strategy_agent = StrategyAgent(
+            enable_llm=self.config.enable_llm_consultation
+        )
+        self._last_strategy_decision = None
 
     def _load_config(self) -> SchedulerConfig:
         """Load configuration from database."""
@@ -131,9 +143,10 @@ class SmartScheduler:
         budget = self.budget_manager.get_status()
         active_categories = self.category_discovery.get_active_categories()
 
-        return {
+        status = {
             "enabled": self.config.enabled,
             "interval_hours": self.config.run_interval_hours,
+            "use_strategy_agent": self.config.use_strategy_agent,
             "budget": {
                 "month": budget.month,
                 "limit": budget.monthly_limit,
@@ -150,6 +163,18 @@ class SmartScheduler:
             },
             "daily_budget": self.budget_manager.get_daily_budget(),
         }
+
+        # Add last strategy decision if available
+        if self._last_strategy_decision:
+            status["last_strategy"] = {
+                "cycle_id": self._last_strategy_decision.cycle_id,
+                "decided_at": self._last_strategy_decision.decided_at.isoformat(),
+                "exploit_count": sum(1 for a in self._last_strategy_decision.assessments if a.status == NicheStatus.EXPLOIT),
+                "explore_count": sum(1 for a in self._last_strategy_decision.assessments if a.status == NicheStatus.EXPLORE),
+                "pause_count": sum(1 for a in self._last_strategy_decision.assessments if a.status == NicheStatus.PAUSE),
+            }
+
+        return status
 
     def should_run(self) -> bool:
         """
@@ -171,9 +196,56 @@ class SmartScheduler:
         # (In production, would check last_run_at from DB)
         return True
 
+    def get_strategy_decision(self) -> Dict[str, Any]:
+        """
+        Get strategy decision from Strategy Agent.
+
+        Returns:
+            Strategy decision as dictionary
+        """
+        import psycopg2
+
+        budget = self.budget_manager.get_status()
+        available_tokens = min(
+            budget.tokens_remaining,
+            self.budget_manager.get_daily_budget(),
+        )
+
+        # Load niche metrics from DB
+        try:
+            conn = psycopg2.connect(
+                host=os.getenv("DATABASE_HOST", "localhost"),
+                port=int(os.getenv("DATABASE_PORT", "5432")),
+                dbname=os.getenv("DATABASE_NAME", "smartacus"),
+                user=os.getenv("DATABASE_USER", "postgres"),
+                password=os.getenv("DATABASE_PASSWORD", ""),
+                sslmode=os.getenv("DATABASE_SSL_MODE", "prefer"),
+            )
+
+            niches = load_niche_metrics_from_db(conn)
+            conn.close()
+
+        except Exception as e:
+            logger.error(f"Failed to load niche metrics: {e}")
+            return {"error": str(e)}
+
+        if not niches:
+            return {"error": "No active niches found"}
+
+        # Get strategy decision
+        decision = self.strategy_agent.decide(
+            budget=available_tokens,
+            niches=niches,
+        )
+
+        self._last_strategy_decision = decision
+        return decision.to_dict()
+
     def select_categories(self) -> List[CategoryInfo]:
         """
         Select categories to scan based on priority and budget.
+
+        V3.0: Uses Strategy Agent if enabled, otherwise falls back to simple selection.
 
         Returns:
             List of categories to scan
@@ -184,6 +256,11 @@ class SmartScheduler:
             self.budget_manager.get_daily_budget(),
         )
 
+        # V3.0: Use Strategy Agent for intelligent selection
+        if self.config.use_strategy_agent:
+            return self._select_via_strategy_agent(available_tokens)
+
+        # Fallback: Simple selection
         categories_with_tokens = self.category_discovery.get_next_categories_to_scan(
             max_categories=self.config.max_categories_per_run,
             available_tokens=available_tokens,
@@ -200,6 +277,84 @@ class SmartScheduler:
                 break
 
         logger.info(f"Selected {len(selected)} categories, ~{tokens_allocated} tokens")
+        return selected
+
+    def _select_via_strategy_agent(self, available_tokens: int) -> List[CategoryInfo]:
+        """
+        Select categories using Strategy Agent.
+
+        Returns:
+            List of CategoryInfo for niches to scan (EXPLOIT + EXPLORE only)
+        """
+        import psycopg2
+
+        try:
+            conn = psycopg2.connect(
+                host=os.getenv("DATABASE_HOST", "localhost"),
+                port=int(os.getenv("DATABASE_PORT", "5432")),
+                dbname=os.getenv("DATABASE_NAME", "smartacus"),
+                user=os.getenv("DATABASE_USER", "postgres"),
+                password=os.getenv("DATABASE_PASSWORD", ""),
+                sslmode=os.getenv("DATABASE_SSL_MODE", "prefer"),
+            )
+
+            niches = load_niche_metrics_from_db(conn)
+            conn.close()
+
+        except Exception as e:
+            logger.error(f"Failed to load niche metrics: {e}")
+            # Fallback to simple selection
+            return self.category_discovery.get_active_categories()[:self.config.max_categories_per_run]
+
+        if not niches:
+            logger.warning("No active niches found for Strategy Agent")
+            return []
+
+        # Get strategy decision
+        decision = self.strategy_agent.decide(
+            budget=available_tokens,
+            niches=niches,
+        )
+
+        self._last_strategy_decision = decision
+
+        # Log decision summary
+        exploit_count = sum(1 for a in decision.assessments if a.status == NicheStatus.EXPLOIT)
+        explore_count = sum(1 for a in decision.assessments if a.status == NicheStatus.EXPLORE)
+        pause_count = sum(1 for a in decision.assessments if a.status == NicheStatus.PAUSE)
+
+        logger.info(f"Strategy decision {decision.cycle_id}: EXPLOIT={exploit_count}, EXPLORE={explore_count}, PAUSE={pause_count}")
+
+        for note in decision.risk_notes:
+            logger.warning(f"  RISK: {note}")
+
+        # Convert assessments to CategoryInfo (only EXPLOIT and EXPLORE)
+        selected = []
+        for assessment in decision.assessments:
+            if assessment.status in (NicheStatus.EXPLOIT, NicheStatus.EXPLORE):
+                # Store max_asins as attribute for later use
+                cat_info = CategoryInfo(
+                    category_id=assessment.niche_id,
+                    name=assessment.name,
+                    amazon_domain=assessment.domain,
+                    priority=1 if assessment.status == NicheStatus.EXPLOIT else 2,
+                    is_active=True,
+                    total_runs=0,
+                    total_opportunities_found=0,
+                    conversion_rate=0,
+                    avg_opportunity_score=0,
+                )
+                # Store allocation info as extra attributes
+                cat_info._tokens_allocated = assessment.tokens_allocated
+                cat_info._max_asins = assessment.max_asins
+                cat_info._status = assessment.status.value
+                cat_info._justification = assessment.justification
+
+                selected.append(cat_info)
+
+                logger.info(f"  {assessment.status.value}: {assessment.name} ({assessment.domain}) - {assessment.tokens_allocated} tokens, {assessment.max_asins} ASINs")
+                logger.debug(f"    Justification: {assessment.justification}")
+
         return selected
 
     def run_category(self, category: CategoryInfo) -> RunResult:
@@ -221,11 +376,14 @@ class SmartScheduler:
         logger.info(f"Starting run for {category.name} ({category.amazon_domain})")
 
         try:
+            # Get max_asins from strategy decision or use default
+            max_asins = getattr(category, '_max_asins', self.config.max_asins_per_category)
+
             # Build command
             cmd = [
                 sys.executable,
                 "scripts/run_controlled.py",
-                "--max-asins", str(self.config.max_asins_per_category),
+                "--max-asins", str(max_asins),
                 "--freeze",  # Always freeze in scheduled runs
                 "--category", str(category.category_id),
                 "--domain", category.amazon_domain,
@@ -411,10 +569,12 @@ class SmartScheduler:
 
 def main():
     """CLI entry point."""
-    parser = argparse.ArgumentParser(description="Smartacus Smart Scheduler")
+    parser = argparse.ArgumentParser(description="Smartacus Smart Scheduler V3.0")
     parser.add_argument("--run-once", action="store_true", help="Run once and exit")
     parser.add_argument("--daemon", action="store_true", help="Run as background daemon")
     parser.add_argument("--status", action="store_true", help="Show scheduler status")
+    parser.add_argument("--strategy", action="store_true", help="Show strategy decision (V3.0)")
+    parser.add_argument("--no-strategy", action="store_true", help="Disable Strategy Agent, use simple selection")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
 
     args = parser.parse_args()
@@ -429,19 +589,27 @@ def main():
     from dotenv import load_dotenv
     load_dotenv()
 
-    scheduler = SmartScheduler()
+    # Create config with strategy agent setting
+    config = None
+    if args.no_strategy:
+        config = SchedulerConfig(use_strategy_agent=False)
+
+    scheduler = SmartScheduler(config=config)
 
     if args.status:
-        import json
         status = scheduler.get_status()
         print(json.dumps(status, indent=2))
+
+    elif args.strategy:
+        # V3.0: Show strategy decision
+        decision = scheduler.get_strategy_decision()
+        print(json.dumps(decision, indent=2, default=str))
 
     elif args.daemon:
         scheduler.start_daemon()
 
     elif args.run_once:
         result = scheduler.run()
-        import json
         print(json.dumps(result, indent=2))
 
     else:
