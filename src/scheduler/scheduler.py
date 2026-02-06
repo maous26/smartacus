@@ -575,6 +575,7 @@ def main():
     parser.add_argument("--status", action="store_true", help="Show scheduler status")
     parser.add_argument("--strategy", action="store_true", help="Show strategy decision (V3.0)")
     parser.add_argument("--no-strategy", action="store_true", help="Disable Strategy Agent, use simple selection")
+    parser.add_argument("--with-llm", action="store_true", help="Enable LLM consultation for ambiguous decisions")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
 
     args = parser.parse_args()
@@ -593,6 +594,8 @@ def main():
     config = None
     if args.no_strategy:
         config = SchedulerConfig(use_strategy_agent=False)
+    elif args.with_llm:
+        config = SchedulerConfig(enable_llm_consultation=True)
 
     scheduler = SmartScheduler(config=config)
 

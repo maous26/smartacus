@@ -524,15 +524,136 @@ class StrategyAgent:
             return None
 
         # Check if LLM consultation is enabled via env
-        llm_api_key = os.getenv("ANTHROPIC_API_KEY") or os.getenv("OPENAI_API_KEY")
+        # Support multiple key names: GPT_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY
+        llm_api_key = os.getenv("GPT_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
         if not llm_api_key:
-            logger.debug("LLM consultation skipped: no API key configured")
+            logger.debug("LLM consultation skipped: no API key configured (GPT_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY)")
             return None
 
-        # TODO: Implement actual LLM call
-        # For now, return None (no override)
-        logger.info("LLM consultation available but not implemented yet")
-        return None
+        try:
+            return self._call_openai_for_decision(exploits, explores, budget, llm_api_key)
+        except Exception as e:
+            logger.warning(f"LLM consultation failed: {e}")
+            return None
+
+    def _call_openai_for_decision(
+        self,
+        exploits: List[Tuple[NicheMetrics, float]],
+        explores: List[Tuple[NicheMetrics, float]],
+        budget: int,
+        api_key: str,
+    ) -> Optional[Tuple[List, List, str]]:
+        """
+        Call OpenAI API to resolve ambiguous allocation decisions.
+
+        Returns:
+            Tuple of (new_exploits, new_explores, override_reason) or None
+        """
+        import json
+        try:
+            from openai import OpenAI
+        except ImportError:
+            logger.warning("OpenAI package not installed. Run: pip install openai")
+            return None
+
+        # Build context for LLM
+        all_niches = exploits + explores
+        niche_data = []
+        for niche, score in all_niches:
+            niche_data.append({
+                "id": niche.niche_id,
+                "name": niche.name,
+                "domain": niche.domain,
+                "score": round(score, 3),
+                "current_status": "EXPLOIT" if (niche, score) in exploits else "EXPLORE",
+                "metrics": {
+                    "runs": niche.total_runs,
+                    "density": f"{niche.density:.1%}",
+                    "value_per_1k_tokens": round(niche.value_per_1k_tokens, 1),
+                    "days_since_scan": niche.days_since_scan,
+                    "critical_events": niche.recent_critical_events,
+                }
+            })
+
+        prompt = f"""Tu es Strategy Agent pour Smartacus, un système de détection d'opportunités e-commerce.
+
+CONTEXTE:
+- Budget disponible: {budget} tokens
+- Seuil EXPLOIT: score > 0.55
+- Seuil EXPLORE: score > 0.25
+
+NICHES À ÉVALUER (scores proches du seuil):
+{json.dumps(niche_data, indent=2, ensure_ascii=False)}
+
+QUESTION:
+Certaines niches ont des scores très proches. Dois-je reclassifier certaines niches?
+- Promouvoir un EXPLORE en EXPLOIT si les métriques justifient un investissement plus fort
+- Rétrograder un EXPLOIT en EXPLORE si les risques sont trop élevés
+
+RÉPONDS EN JSON STRICT:
+{{
+  "should_override": true/false,
+  "changes": [
+    {{"niche_id": 123, "new_status": "EXPLOIT", "reason": "..."}}
+  ],
+  "overall_reason": "Explication courte de la décision"
+}}
+
+Si aucun changement n'est nécessaire, réponds: {{"should_override": false, "changes": [], "overall_reason": "Classement déterministe correct"}}
+"""
+
+        client = OpenAI(api_key=api_key)
+
+        logger.info("Consulting LLM for ambiguous allocation decision...")
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",  # Cost-effective for simple decisions
+            messages=[
+                {"role": "system", "content": "Tu es un assistant d'allocation de ressources. Réponds uniquement en JSON valide."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.1,  # Low temperature for consistent decisions
+            max_tokens=500,
+        )
+
+        result_text = response.choices[0].message.content.strip()
+
+        # Parse JSON response
+        # Handle markdown code blocks if present
+        if result_text.startswith("```"):
+            result_text = result_text.split("```")[1]
+            if result_text.startswith("json"):
+                result_text = result_text[4:]
+            result_text = result_text.strip()
+
+        result = json.loads(result_text)
+
+        if not result.get("should_override", False):
+            logger.info(f"LLM decision: No override needed - {result.get('overall_reason', 'N/A')}")
+            return None
+
+        # Apply changes
+        new_exploits = list(exploits)
+        new_explores = list(explores)
+
+        for change in result.get("changes", []):
+            niche_id = change["niche_id"]
+            new_status = change["new_status"]
+
+            # Find the niche in current lists
+            for niche, score in exploits + explores:
+                if niche.niche_id == niche_id:
+                    if new_status == "EXPLOIT" and (niche, score) in new_explores:
+                        new_explores.remove((niche, score))
+                        new_exploits.append((niche, score))
+                        logger.info(f"LLM override: {niche.name} EXPLORE -> EXPLOIT ({change.get('reason', 'N/A')})")
+                    elif new_status == "EXPLORE" and (niche, score) in new_exploits:
+                        new_exploits.remove((niche, score))
+                        new_explores.append((niche, score))
+                        logger.info(f"LLM override: {niche.name} EXPLOIT -> EXPLORE ({change.get('reason', 'N/A')})")
+                    break
+
+        return (new_exploits, new_explores, result.get("overall_reason", "LLM override"))
 
     def _generate_risk_notes(
         self,
