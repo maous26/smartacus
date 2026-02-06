@@ -22,7 +22,7 @@ import logging
 import hashlib
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Literal, Tuple
+from typing import List, Dict, Optional, Literal, Tuple, Any
 from enum import Enum
 
 logger = logging.getLogger(__name__)
@@ -116,14 +116,34 @@ LLM_RESPONSE_SCHEMA = {
 
 
 # =============================================================================
-# LLM RESPONSE CACHE
+# LLM RESPONSE CACHE (Redis-backed with in-memory fallback)
 # =============================================================================
 
 class LLMResponseCache:
-    """Simple in-memory cache for LLM responses."""
+    """
+    Redis-backed cache for LLM responses with in-memory fallback.
+
+    Uses Redis if available, otherwise falls back to in-memory cache.
+    Cache keys are prefixed with 'llm:strategy:' for namespace isolation.
+    """
+
+    CACHE_PREFIX = "llm:strategy"
 
     def __init__(self):
-        self._cache: Dict[str, Tuple[datetime, Dict]] = {}
+        self._redis_cache = None
+        self._memory_cache: Dict[str, Tuple[datetime, Dict]] = {}
+        self._init_redis()
+
+    def _init_redis(self) -> None:
+        """Initialize Redis cache if available."""
+        try:
+            from src.cache import get_cache
+            self._redis_cache = get_cache()
+            logger.debug(f"LLM cache using backend: {self._redis_cache.get_stats()['backend']}")
+        except ImportError:
+            logger.debug("Redis cache module not available, using in-memory cache")
+        except Exception as e:
+            logger.warning(f"Failed to initialize Redis cache: {e}")
 
     def _compute_cache_key(
         self,
@@ -147,24 +167,72 @@ class LLMResponseCache:
 
     def get(self, key: str, ttl_hours: int) -> Optional[Dict]:
         """Get cached response if valid."""
-        if key not in self._cache:
+        full_key = f"{self.CACHE_PREFIX}:{key}"
+
+        # Try Redis first
+        if self._redis_cache:
+            try:
+                result = self._redis_cache.get(full_key)
+                if result is not None:
+                    logger.debug(f"Redis cache hit for {key}")
+                    return result
+            except Exception as e:
+                logger.warning(f"Redis get failed: {e}")
+
+        # Fallback to memory cache
+        if key not in self._memory_cache:
             return None
-        cached_at, response = self._cache[key]
+        cached_at, response = self._memory_cache[key]
         if datetime.utcnow() - cached_at > timedelta(hours=ttl_hours):
-            del self._cache[key]
+            del self._memory_cache[key]
             return None
         return response
 
-    def set(self, key: str, response: Dict) -> None:
+    def set(self, key: str, response: Dict, ttl_hours: int = 24) -> None:
         """Cache a response."""
-        self._cache[key] = (datetime.utcnow(), response)
+        full_key = f"{self.CACHE_PREFIX}:{key}"
+
+        # Try Redis first
+        if self._redis_cache:
+            try:
+                self._redis_cache.set(full_key, response, ttl_hours=ttl_hours)
+                logger.debug(f"Redis cache set for {key} (TTL: {ttl_hours}h)")
+                return
+            except Exception as e:
+                logger.warning(f"Redis set failed: {e}")
+
+        # Fallback to memory cache
+        self._memory_cache[key] = (datetime.utcnow(), response)
 
     def clear(self) -> None:
         """Clear all cached responses."""
-        self._cache.clear()
+        # Clear Redis
+        if self._redis_cache:
+            try:
+                self._redis_cache.clear_prefix(self.CACHE_PREFIX)
+            except Exception as e:
+                logger.warning(f"Redis clear failed: {e}")
+
+        # Clear memory
+        self._memory_cache.clear()
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get cache statistics."""
+        stats = {
+            "memory_keys": len(self._memory_cache),
+            "redis_available": self._redis_cache is not None,
+        }
+        if self._redis_cache:
+            try:
+                redis_stats = self._redis_cache.get_stats()
+                stats["redis_backend"] = redis_stats.get("backend", "unknown")
+                stats["redis_connected"] = redis_stats.get("connected", False)
+            except Exception:
+                pass
+        return stats
 
 
-# Global cache instance
+# Global cache instance (singleton)
 _llm_cache = LLMResponseCache()
 
 
@@ -861,8 +929,8 @@ Si le classement déterministe est correct:
 
         result = json.loads(result_text)
 
-        # Cache the response
-        _llm_cache.set(cache_key, result)
+        # Cache the response (use configured TTL)
+        _llm_cache.set(cache_key, result, ttl_hours=self.llm_config.cache_ttl_hours)
 
         # Track metrics
         changed_decision = result.get("should_override", False)
