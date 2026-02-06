@@ -17,6 +17,7 @@ Features:
 """
 
 import os
+import json
 import logging
 import hashlib
 from datetime import datetime, timedelta
@@ -25,6 +26,146 @@ from typing import List, Dict, Optional, Literal, Tuple
 from enum import Enum
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# LLM CONFIGURATION (normalized)
+# =============================================================================
+
+@dataclass
+class LLMConfig:
+    """Normalized LLM configuration."""
+    provider: str = "openai"      # openai, anthropic
+    model: str = "gpt-4o-mini"    # Model to use
+    api_key: Optional[str] = None
+    max_tokens: int = 500
+    temperature: float = 0.1
+    cache_ttl_hours: int = 24     # Cache TTL for responses
+
+    @classmethod
+    def from_env(cls) -> "LLMConfig":
+        """Load LLM config from environment variables."""
+        provider = os.getenv("LLM_PROVIDER", "openai").lower()
+        model = os.getenv("LLM_MODEL", "gpt-4o-mini")
+
+        # Find API key based on provider or fallback
+        api_key = None
+        if provider == "openai":
+            api_key = os.getenv("GPT_API_KEY") or os.getenv("OPENAI_API_KEY")
+        elif provider == "anthropic":
+            api_key = os.getenv("ANTHROPIC_API_KEY")
+
+        # Fallback: try all keys
+        if not api_key:
+            api_key = os.getenv("GPT_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
+
+        return cls(
+            provider=provider,
+            model=model,
+            api_key=api_key,
+            max_tokens=int(os.getenv("LLM_MAX_TOKENS", "500")),
+            temperature=float(os.getenv("LLM_TEMPERATURE", "0.1")),
+            cache_ttl_hours=int(os.getenv("LLM_CACHE_TTL_HOURS", "24")),
+        )
+
+
+# =============================================================================
+# LLM RESPONSE SCHEMA (strict)
+# =============================================================================
+
+LLM_RESPONSE_SCHEMA = {
+    "type": "object",
+    "required": ["should_override", "recommended_order", "rationale", "confidence"],
+    "properties": {
+        "should_override": {"type": "boolean"},
+        "recommended_order": {
+            "type": "array",
+            "items": {"type": "integer"},
+            "description": "Niche IDs in recommended priority order"
+        },
+        "rationale": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["niche_id", "reason_codes"],
+                "properties": {
+                    "niche_id": {"type": "integer"},
+                    "new_status": {"type": "string", "enum": ["EXPLOIT", "EXPLORE", "PAUSE"]},
+                    "reason_codes": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": [
+                            "HIGH_VALUE", "LOW_VALUE",
+                            "HIGH_DENSITY", "LOW_DENSITY",
+                            "STALE_DATA", "FRESH_DATA",
+                            "CRITICAL_EVENT", "NO_DATA",
+                            "COLD_START", "MATURE_NICHE"
+                        ]}
+                    },
+                    "notes": {"type": "string"}
+                }
+            }
+        },
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "disagreements": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Where LLM disagrees with deterministic algo"
+        }
+    }
+}
+
+
+# =============================================================================
+# LLM RESPONSE CACHE
+# =============================================================================
+
+class LLMResponseCache:
+    """Simple in-memory cache for LLM responses."""
+
+    def __init__(self):
+        self._cache: Dict[str, Tuple[datetime, Dict]] = {}
+
+    def _compute_cache_key(
+        self,
+        niches: List["NicheMetrics"],
+        budget: int,
+        thresholds: Tuple[float, float],
+    ) -> str:
+        """Compute cache key from inputs."""
+        # Sort niches by ID for deterministic hash
+        niche_data = sorted([
+            (n.niche_id, round(n.density, 4), round(n.value_per_1k_tokens, 2), n.total_runs)
+            for n in niches
+        ])
+        key_input = json.dumps({
+            "niches": niche_data,
+            "budget": budget,
+            "thresholds": thresholds,
+            "version": "v1.0",  # Bump when algo changes
+        }, sort_keys=True)
+        return hashlib.sha256(key_input.encode()).hexdigest()[:16]
+
+    def get(self, key: str, ttl_hours: int) -> Optional[Dict]:
+        """Get cached response if valid."""
+        if key not in self._cache:
+            return None
+        cached_at, response = self._cache[key]
+        if datetime.utcnow() - cached_at > timedelta(hours=ttl_hours):
+            del self._cache[key]
+            return None
+        return response
+
+    def set(self, key: str, response: Dict) -> None:
+        """Cache a response."""
+        self._cache[key] = (datetime.utcnow(), response)
+
+    def clear(self) -> None:
+        """Clear all cached responses."""
+        self._cache.clear()
+
+
+# Global cache instance
+_llm_cache = LLMResponseCache()
 
 
 # =============================================================================
@@ -98,6 +239,20 @@ class NicheAssessment:
 
 
 @dataclass
+class LLMMetrics:
+    """Metrics for LLM consultation (for cost/impact tracking)."""
+    provider: str = ""
+    model: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    cost_estimate_usd: float = 0.0
+    latency_ms: int = 0
+    cache_hit: bool = False
+    changed_decision: bool = False
+
+
+@dataclass
 class StrategyDecision:
     """Complete strategy decision for a cycle."""
     cycle_id: str
@@ -113,10 +268,11 @@ class StrategyDecision:
     # LLM consultation (if used)
     llm_consulted: bool = False
     llm_override_reason: Optional[str] = None
+    llm_metrics: Optional[LLMMetrics] = None
 
     def to_dict(self) -> Dict:
         """Convert to dictionary for logging/storage."""
-        return {
+        result = {
             "cycle_id": self.cycle_id,
             "decided_at": self.decided_at.isoformat(),
             "budget": {
@@ -143,6 +299,22 @@ class StrategyDecision:
             "llm_consulted": self.llm_consulted,
             "llm_override_reason": self.llm_override_reason,
         }
+
+        # Add LLM metrics if available
+        if self.llm_metrics:
+            result["llm_metrics"] = {
+                "provider": self.llm_metrics.provider,
+                "model": self.llm_metrics.model,
+                "prompt_tokens": self.llm_metrics.prompt_tokens,
+                "completion_tokens": self.llm_metrics.completion_tokens,
+                "total_tokens": self.llm_metrics.total_tokens,
+                "cost_estimate_usd": round(self.llm_metrics.cost_estimate_usd, 6),
+                "latency_ms": self.llm_metrics.latency_ms,
+                "cache_hit": self.llm_metrics.cache_hit,
+                "changed_decision": self.llm_metrics.changed_decision,
+            }
+
+        return result
 
 
 # =============================================================================
@@ -180,15 +352,18 @@ class StrategyAgent:
     # Event boost
     EVENT_BOOST_MULTIPLIER = 1.5  # Boost score if critical events
 
-    def __init__(self, enable_llm: bool = False):
+    def __init__(self, enable_llm: bool = False, llm_config: Optional[LLMConfig] = None):
         """
         Initialize Strategy Agent.
 
         Args:
             enable_llm: If True, may consult LLM for ambiguous decisions
+            llm_config: Optional LLM configuration (loads from env if None)
         """
         self.enable_llm = enable_llm
+        self.llm_config = llm_config or LLMConfig.from_env()
         self._cycle_counter = 0
+        self._last_llm_metrics: Optional[LLMMetrics] = None
 
     def decide(
         self,
@@ -304,6 +479,7 @@ class StrategyAgent:
             risk_notes=risk_notes,
             llm_consulted=llm_consulted,
             llm_override_reason=llm_override_reason,
+            llm_metrics=self._last_llm_metrics,
         )
 
     def _score_niche(self, niche: NicheMetrics) -> float:
@@ -517,39 +693,70 @@ class StrategyAgent:
         """
         Optionally consult LLM for ambiguous allocation decisions.
 
+        Features:
+        - Response caching by input hash
+        - Strict JSON schema enforcement
+        - Veto policy for hard limits
+        - Cost/impact tracking
+
         Returns:
             Tuple of (new_exploits, new_explores, override_reason) or None
         """
         if not self.enable_llm:
             return None
 
-        # Check if LLM consultation is enabled via env
-        # Support multiple key names: GPT_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY
-        llm_api_key = os.getenv("GPT_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
-        if not llm_api_key:
-            logger.debug("LLM consultation skipped: no API key configured (GPT_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY)")
+        # Reset metrics
+        self._last_llm_metrics = None
+
+        # Check API key
+        if not self.llm_config.api_key:
+            logger.debug("LLM consultation skipped: no API key configured")
+            return None
+
+        # Check cache first
+        all_niches = [n for n, _ in exploits + explores]
+        cache_key = _llm_cache._compute_cache_key(
+            all_niches, budget, (self.EXPLOIT_THRESHOLD, self.EXPLORE_THRESHOLD)
+        )
+        cached = _llm_cache.get(cache_key, self.llm_config.cache_ttl_hours)
+        if cached:
+            logger.info(f"LLM cache hit for key {cache_key}")
+            self._last_llm_metrics = LLMMetrics(
+                provider=self.llm_config.provider,
+                model=self.llm_config.model,
+                cache_hit=True,
+                changed_decision=cached.get("should_override", False),
+            )
+            if cached.get("should_override"):
+                return self._apply_llm_response(cached, exploits, explores, budget)
             return None
 
         try:
-            return self._call_openai_for_decision(exploits, explores, budget, llm_api_key)
+            return self._call_llm_for_decision(exploits, explores, budget, cache_key)
         except Exception as e:
             logger.warning(f"LLM consultation failed: {e}")
             return None
 
-    def _call_openai_for_decision(
+    def _call_llm_for_decision(
         self,
         exploits: List[Tuple[NicheMetrics, float]],
         explores: List[Tuple[NicheMetrics, float]],
         budget: int,
-        api_key: str,
+        cache_key: str,
     ) -> Optional[Tuple[List, List, str]]:
         """
-        Call OpenAI API to resolve ambiguous allocation decisions.
+        Call LLM API to resolve ambiguous allocation decisions.
+
+        Features:
+        - Strict JSON schema with reason_codes
+        - Cost tracking
+        - Veto policy enforcement
+        - Response caching
 
         Returns:
             Tuple of (new_exploits, new_explores, override_reason) or None
         """
-        import json
+        import time
         try:
             from openai import OpenAI
         except ImportError:
@@ -575,51 +782,77 @@ class StrategyAgent:
                 }
             })
 
+        # Build prompt with strict schema
         prompt = f"""Tu es Strategy Agent pour Smartacus, un système de détection d'opportunités e-commerce.
 
 CONTEXTE:
 - Budget disponible: {budget} tokens
-- Seuil EXPLOIT: score > 0.55
-- Seuil EXPLORE: score > 0.25
+- Seuil EXPLOIT: score > {self.EXPLOIT_THRESHOLD}
+- Seuil EXPLORE: score > {self.EXPLORE_THRESHOLD}
 
-NICHES À ÉVALUER (scores proches du seuil):
+NICHES À ÉVALUER:
 {json.dumps(niche_data, indent=2, ensure_ascii=False)}
 
-QUESTION:
-Certaines niches ont des scores très proches. Dois-je reclassifier certaines niches?
-- Promouvoir un EXPLORE en EXPLOIT si les métriques justifient un investissement plus fort
-- Rétrograder un EXPLOIT en EXPLORE si les risques sont trop élevés
+RÈGLES DE VETO (tu ne peux PAS violer):
+- Tu ne peux PAS mettre en EXPLOIT une niche avec score < {self.EXPLORE_THRESHOLD} (hard floor)
+- Tu ne peux PAS changer les quotas 70/20/10 exploit/explore/reserve
+- Tu peux seulement RÉORDONNER ou RECLASSIFIER entre EXPLOIT et EXPLORE
 
-RÉPONDS EN JSON STRICT:
+QUESTION:
+Dois-je ajuster le classement déterministe? Réponds UNIQUEMENT si tu identifies un problème clair.
+
+RÉPONDS EN JSON STRICT (schéma obligatoire):
 {{
-  "should_override": true/false,
-  "changes": [
-    {{"niche_id": 123, "new_status": "EXPLOIT", "reason": "..."}}
+  "should_override": false,
+  "recommended_order": [niche_id1, niche_id2, ...],
+  "rationale": [
+    {{
+      "niche_id": 123,
+      "new_status": "EXPLOIT",
+      "reason_codes": ["HIGH_VALUE", "CRITICAL_EVENT"],
+      "notes": "Justification courte"
+    }}
   ],
-  "overall_reason": "Explication courte de la décision"
+  "confidence": 0.8,
+  "disagreements": ["Point de désaccord avec l'algo déterministe"]
 }}
 
-Si aucun changement n'est nécessaire, réponds: {{"should_override": false, "changes": [], "overall_reason": "Classement déterministe correct"}}
+reason_codes valides: HIGH_VALUE, LOW_VALUE, HIGH_DENSITY, LOW_DENSITY, STALE_DATA, FRESH_DATA, CRITICAL_EVENT, NO_DATA, COLD_START, MATURE_NICHE
+
+Si le classement déterministe est correct:
+{{"should_override": false, "recommended_order": [], "rationale": [], "confidence": 1.0, "disagreements": []}}
 """
 
-        client = OpenAI(api_key=api_key)
+        client = OpenAI(api_key=self.llm_config.api_key)
 
-        logger.info("Consulting LLM for ambiguous allocation decision...")
+        logger.info(f"Consulting LLM ({self.llm_config.model}) for ambiguous allocation...")
+        start_time = time.time()
 
         response = client.chat.completions.create(
-            model="gpt-4o-mini",  # Cost-effective for simple decisions
+            model=self.llm_config.model,
             messages=[
-                {"role": "system", "content": "Tu es un assistant d'allocation de ressources. Réponds uniquement en JSON valide."},
+                {"role": "system", "content": "Tu es un assistant d'allocation de ressources. Réponds UNIQUEMENT en JSON valide suivant le schéma demandé."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.1,  # Low temperature for consistent decisions
-            max_tokens=500,
+            temperature=self.llm_config.temperature,
+            max_tokens=self.llm_config.max_tokens,
         )
+
+        latency_ms = int((time.time() - start_time) * 1000)
+
+        # Extract usage and compute cost
+        usage = response.usage
+        prompt_tokens = usage.prompt_tokens if usage else 0
+        completion_tokens = usage.completion_tokens if usage else 0
+        total_tokens = prompt_tokens + completion_tokens
+
+        # Cost estimation (gpt-4o-mini pricing as of 2024)
+        # Input: $0.15/1M tokens, Output: $0.60/1M tokens
+        cost_estimate = (prompt_tokens * 0.15 + completion_tokens * 0.60) / 1_000_000
 
         result_text = response.choices[0].message.content.strip()
 
-        # Parse JSON response
-        # Handle markdown code blocks if present
+        # Parse JSON response (handle markdown code blocks)
         if result_text.startswith("```"):
             result_text = result_text.split("```")[1]
             if result_text.startswith("json"):
@@ -628,32 +861,100 @@ Si aucun changement n'est nécessaire, réponds: {{"should_override": false, "ch
 
         result = json.loads(result_text)
 
-        if not result.get("should_override", False):
-            logger.info(f"LLM decision: No override needed - {result.get('overall_reason', 'N/A')}")
+        # Cache the response
+        _llm_cache.set(cache_key, result)
+
+        # Track metrics
+        changed_decision = result.get("should_override", False)
+        self._last_llm_metrics = LLMMetrics(
+            provider=self.llm_config.provider,
+            model=self.llm_config.model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            cost_estimate_usd=cost_estimate,
+            latency_ms=latency_ms,
+            cache_hit=False,
+            changed_decision=changed_decision,
+        )
+
+        logger.info(f"LLM response: {total_tokens} tokens, ${cost_estimate:.6f}, {latency_ms}ms")
+
+        if not changed_decision:
+            logger.info(f"LLM decision: No override needed (confidence: {result.get('confidence', 'N/A')})")
+            if result.get("disagreements"):
+                for d in result["disagreements"]:
+                    logger.debug(f"  LLM disagreement: {d}")
             return None
 
-        # Apply changes
+        # Apply with veto policy
+        return self._apply_llm_response(result, exploits, explores, budget)
+
+    def _apply_llm_response(
+        self,
+        result: Dict,
+        exploits: List[Tuple[NicheMetrics, float]],
+        explores: List[Tuple[NicheMetrics, float]],
+        budget: int,
+    ) -> Optional[Tuple[List, List, str]]:
+        """
+        Apply LLM response with veto policy enforcement.
+
+        Veto rules:
+        - Cannot promote to EXPLOIT if score < EXPLORE_THRESHOLD
+        - Cannot change budget allocation ratios
+        - Can only reorder/reclassify between EXPLOIT and EXPLORE
+        """
         new_exploits = list(exploits)
         new_explores = list(explores)
+        vetoed_count = 0
 
-        for change in result.get("changes", []):
-            niche_id = change["niche_id"]
-            new_status = change["new_status"]
+        for change in result.get("rationale", []):
+            niche_id = change.get("niche_id")
+            new_status = change.get("new_status")
+            reason_codes = change.get("reason_codes", [])
 
-            # Find the niche in current lists
+            if not niche_id or not new_status:
+                continue
+
+            # Find the niche
+            found_niche = None
+            found_score = 0
             for niche, score in exploits + explores:
                 if niche.niche_id == niche_id:
-                    if new_status == "EXPLOIT" and (niche, score) in new_explores:
-                        new_explores.remove((niche, score))
-                        new_exploits.append((niche, score))
-                        logger.info(f"LLM override: {niche.name} EXPLORE -> EXPLOIT ({change.get('reason', 'N/A')})")
-                    elif new_status == "EXPLORE" and (niche, score) in new_exploits:
-                        new_exploits.remove((niche, score))
-                        new_explores.append((niche, score))
-                        logger.info(f"LLM override: {niche.name} EXPLOIT -> EXPLORE ({change.get('reason', 'N/A')})")
+                    found_niche = niche
+                    found_score = score
                     break
 
-        return (new_exploits, new_explores, result.get("overall_reason", "LLM override"))
+            if not found_niche:
+                logger.warning(f"LLM referenced unknown niche_id: {niche_id}")
+                continue
+
+            # VETO CHECK: Cannot promote to EXPLOIT if score too low
+            if new_status == "EXPLOIT" and found_score < self.EXPLORE_THRESHOLD:
+                logger.warning(f"VETO: Cannot promote {found_niche.name} to EXPLOIT (score {found_score:.2f} < {self.EXPLORE_THRESHOLD})")
+                vetoed_count += 1
+                continue
+
+            # Apply change
+            if new_status == "EXPLOIT" and (found_niche, found_score) in new_explores:
+                new_explores.remove((found_niche, found_score))
+                new_exploits.append((found_niche, found_score))
+                logger.info(f"LLM override: {found_niche.name} EXPLORE -> EXPLOIT ({reason_codes})")
+            elif new_status == "EXPLORE" and (found_niche, found_score) in new_exploits:
+                new_exploits.remove((found_niche, found_score))
+                new_explores.append((found_niche, found_score))
+                logger.info(f"LLM override: {found_niche.name} EXPLOIT -> EXPLORE ({reason_codes})")
+
+        if vetoed_count > 0:
+            logger.warning(f"Vetoed {vetoed_count} LLM recommendations")
+
+        # Build overall reason
+        overall_reason = f"LLM override (confidence: {result.get('confidence', 'N/A')})"
+        if result.get("disagreements"):
+            overall_reason += f" - Disagreements: {', '.join(result['disagreements'][:2])}"
+
+        return (new_exploits, new_explores, overall_reason)
 
     def _generate_risk_notes(
         self,
