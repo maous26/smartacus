@@ -723,7 +723,7 @@ def run_controlled(
                         negative_pct = 0.10  # Default
                         wish_mentions = 0
                         common_complaints = []
-                        rating_now = float(snap.rating) if snap.rating else 4.0
+                        rating_now = float(snap.rating_average) if snap.rating_average else 4.0
                         rating_30d_ago = rating_now  # No historical data yet
 
                         try:
