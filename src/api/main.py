@@ -43,6 +43,7 @@ from .rag_routes import router as rag_router
 from .spec_routes import router as spec_router
 from .review_routes import router as review_router
 from .sourcing_routes import router as sourcing_router
+from .risk_routes import router as risk_router
 from . import db
 
 # Configure logging
@@ -120,6 +121,9 @@ app.include_router(review_router)
 
 # Include Sourcing routes
 app.include_router(sourcing_router)
+
+# Include Risk Journal routes
+app.include_router(risk_router)
 
 
 # ============================================================================

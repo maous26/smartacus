@@ -1,11 +1,27 @@
 'use client';
 
+/**
+ * OpportunityDetail Component
+ * ===========================
+ *
+ * V3.1 - Honest framing based on UX philosophy:
+ * "Smartacus n'est pas là pour décider à ta place.
+ *  Il est là pour t'empêcher de décider pour de mauvaises raisons."
+ *
+ * Key principles:
+ * - Always show limitations
+ * - Separate factual vs interpretive vs missing
+ * - Never conclude without explicit uncertainty
+ */
+
 import { useState, useEffect } from 'react';
-import { Opportunity, ComponentScore } from '@/types/opportunity';
+import { Opportunity, ComponentScore, ReviewProfile, SpecBundle } from '@/types/opportunity';
 import { UrgencyBadge } from './UrgencyBadge';
 import { ScoreRing } from './ScoreRing';
 import { ReviewInsightPanel } from './ReviewInsightPanel';
 import { ProductSpecPanel } from './ProductSpecPanel';
+import { ConfidenceState, calculateConfidenceLevel, ConfidenceLevel } from './ConfidenceState';
+import { RiskOverrideModal, HypothesisReason } from './RiskOverrideModal';
 import { formatNumber, formatPrice, formatCurrency, formatDate } from '@/lib/format';
 import { api } from '@/lib/api';
 
@@ -64,7 +80,6 @@ export function OpportunityDetail({ opportunity, onClose, onStartSourcing, isDem
     timeMultiplier,
     windowDays,
     urgencyLevel,
-    urgencyLabel,
     estimatedMonthlyProfit,
     estimatedAnnualValue,
     riskAdjustedValue,
@@ -80,6 +95,17 @@ export function OpportunityDetail({ opportunity, onClose, onStartSourcing, isDem
 
   const [isSaved, setIsSaved] = useState(false);
   const [autoThesis, setAutoThesis] = useState<AutoThesis | null>(null);
+  const [reviewProfile, setReviewProfile] = useState<ReviewProfile | null>(null);
+  const [hasSpecBundle, setHasSpecBundle] = useState(false);
+  const [showRiskModal, setShowRiskModal] = useState(false);
+
+  // Calculate confidence state
+  const { level: confidenceLevel, reasons: confidenceReasons } = calculateConfidenceLevel(
+    reviewProfile,
+    hasSpecBundle,
+    componentScores,
+    finalScore
+  );
 
   useEffect(() => {
     const saved = JSON.parse(localStorage.getItem('smartacus_saved') || '[]') as string[];
@@ -90,6 +116,18 @@ export function OpportunityDetail({ opportunity, onClose, onStartSourcing, isDem
   useEffect(() => {
     if (isDemo) return;
     api.getAutoThesis(asin).then(setAutoThesis).catch(() => setAutoThesis(null));
+  }, [asin, isDemo]);
+
+  // Fetch review profile for confidence calculation
+  useEffect(() => {
+    if (isDemo) return;
+    api.getReviewProfile(asin).then(setReviewProfile).catch(() => setReviewProfile(null));
+  }, [asin, isDemo]);
+
+  // Check if spec bundle exists
+  useEffect(() => {
+    if (isDemo) return;
+    api.getSpecBundle(asin).then((spec) => setHasSpecBundle(!!spec)).catch(() => setHasSpecBundle(false));
   }, [asin, isDemo]);
 
   const handleSave = () => {
@@ -104,6 +142,70 @@ export function OpportunityDetail({ opportunity, onClose, onStartSourcing, isDem
     }
   };
 
+  const handleProceedAnyway = () => {
+    if (confidenceLevel !== 'eclaire') {
+      setShowRiskModal(true);
+    } else if (onStartSourcing) {
+      onStartSourcing();
+    }
+  };
+
+  const handleRiskConfirm = async (hypothesis: string, reason: HypothesisReason) => {
+    // Log the risk override
+    try {
+      await api.createRiskOverride({
+        asin,
+        confidenceLevel,
+        hypothesis,
+        hypothesisReason: reason,
+        missingInfo: confidenceReasons.filter(r => r.includes('non') || r.includes('partiel')),
+      });
+    } catch (e) {
+      console.error('Failed to log risk override:', e);
+    }
+
+    setShowRiskModal(false);
+    if (onStartSourcing) {
+      onStartSourcing();
+    }
+  };
+
+  // Determine what we know vs don't know
+  const whatWeKnow: string[] = [];
+  const whatWeDontKnow: string[] = [];
+
+  if (componentScores) {
+    if (componentScores['margin']?.score >= componentScores['margin']?.maxScore * 0.5) {
+      whatWeKnow.push('Structure de prix cohérente');
+    } else {
+      whatWeDontKnow.push('Marge réelle non validée');
+    }
+    if (componentScores['velocity']?.score >= componentScores['velocity']?.maxScore * 0.3) {
+      whatWeKnow.push('Demande mesurable sur le marché');
+    }
+  }
+
+  if (windowDays > 30) {
+    whatWeKnow.push(`Fenêtre temporelle estimée: ${windowDays} jours`);
+  } else {
+    whatWeDontKnow.push('Fenêtre courte, timing serré');
+  }
+
+  if (reviewProfile?.reviewsReady && reviewProfile.reviewsAnalyzed >= 20) {
+    whatWeKnow.push(`${reviewProfile.reviewsAnalyzed} avis analysés`);
+    if (reviewProfile.dominantPain) {
+      whatWeKnow.push(`Défaut dominant identifié`);
+    }
+  } else {
+    whatWeDontKnow.push('Analyse détaillée des avis non complète');
+  }
+
+  if (!hasSpecBundle) {
+    whatWeDontKnow.push('Différenciation produit non validée');
+  }
+
+  whatWeDontKnow.push('Contraintes industrielles non évaluées');
+
   return (
     <div className="bg-white rounded-2xl shadow-xl border border-gray-200 overflow-hidden">
       {/* DEMO banner */}
@@ -112,13 +214,14 @@ export function OpportunityDetail({ opportunity, onClose, onStartSourcing, isDem
           Données de démonstration
         </div>
       )}
-      {/* Header */}
+
+      {/* Header - V3.1: More neutral framing */}
       <div className="bg-gradient-to-r from-gray-900 to-gray-800 text-white p-6">
         <div className="flex items-start justify-between">
           <div>
             <div className="flex items-center gap-3 mb-2">
-              <span className="bg-white text-gray-900 font-bold px-3 py-1 rounded-full text-sm">
-                #{rank}
+              <span className="bg-white/20 text-white font-medium px-3 py-1 rounded-full text-sm">
+                Opportunité détectée
               </span>
               <span className="font-mono text-gray-300">{asin}</span>
             </div>
@@ -132,7 +235,7 @@ export function OpportunityDetail({ opportunity, onClose, onStartSourcing, isDem
 
           <div className="text-right">
             <ScoreRing score={finalScore} size="lg" />
-            <div className="text-xs text-gray-400 mt-2">Score Final</div>
+            <div className="text-xs text-gray-400 mt-2">Score économique</div>
           </div>
         </div>
 
@@ -143,16 +246,67 @@ export function OpportunityDetail({ opportunity, onClose, onStartSourcing, isDem
 
       {/* Content */}
       <div className="p-6">
+        {/* V3.1: Honest intro message */}
+        <div className="mb-6 p-4 bg-slate-50 rounded-xl border border-slate-200">
+          <p className="text-sm text-slate-700">
+            Cette opportunité a été détectée à partir de données de marché Amazon
+            (prix, ventes, concurrence, timing).{' '}
+            <span className="font-medium">Ce n'est pas une recommandation d'achat.</span>
+          </p>
+          <p className="text-sm text-slate-600 mt-2">
+            Smartacus identifie des signaux économiques intéressants, puis met en évidence
+            ce qui est solide, ce qui est incertain, et ce qui manque encore avant toute décision.
+          </p>
+        </div>
+
+        {/* V3.1: Confidence State */}
+        <ConfidenceState
+          level={confidenceLevel}
+          reasons={confidenceReasons}
+          expanded={confidenceLevel !== 'eclaire'}
+          className="mb-6"
+        />
+
+        {/* What we know vs don't know */}
+        <div className="grid grid-cols-2 gap-4 mb-6">
+          <div className="bg-emerald-50 rounded-xl p-4 border border-emerald-200">
+            <h4 className="text-sm font-semibold text-emerald-800 mb-2">Ce que nous savons</h4>
+            <ul className="space-y-1">
+              {whatWeKnow.map((item, idx) => (
+                <li key={idx} className="text-sm text-emerald-700 flex items-start gap-2">
+                  <span className="text-emerald-500 mt-0.5">✓</span>
+                  {item}
+                </li>
+              ))}
+              <li className="text-sm text-emerald-700 flex items-start gap-2">
+                <span className="text-emerald-500 mt-0.5">✓</span>
+                Score économique: {finalScore}/100
+              </li>
+            </ul>
+          </div>
+          <div className="bg-amber-50 rounded-xl p-4 border border-amber-200">
+            <h4 className="text-sm font-semibold text-amber-800 mb-2">Ce que nous ne savons pas encore</h4>
+            <ul className="space-y-1">
+              {whatWeDontKnow.map((item, idx) => (
+                <li key={idx} className="text-sm text-amber-700 flex items-start gap-2">
+                  <span className="text-amber-500 mt-0.5">?</span>
+                  {item}
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+
         {/* Valeur économique */}
         <div className="grid grid-cols-3 gap-4 mb-6">
           <div className="bg-emerald-50 rounded-xl p-4 text-center border border-emerald-200">
-            <div className="text-sm text-emerald-700">Mensuel</div>
+            <div className="text-sm text-emerald-700">Mensuel estimé</div>
             <div className="text-xl font-bold text-emerald-600">
               {formatCurrency(Math.round(estimatedMonthlyProfit || 0))}
             </div>
           </div>
           <div className="bg-green-50 rounded-xl p-4 text-center border border-green-200">
-            <div className="text-sm text-green-700">Annuel</div>
+            <div className="text-sm text-green-700">Annuel estimé</div>
             <div className="text-xl font-bold text-green-600">
               {formatCurrency(Math.round(estimatedAnnualValue || 0))}
             </div>
@@ -165,7 +319,7 @@ export function OpportunityDetail({ opportunity, onClose, onStartSourcing, isDem
           </div>
         </div>
 
-        {/* Thèse - show auto-generated if available */}
+        {/* Thèse - V3.1: Conditional framing */}
         <div className="mb-6">
           <h3 className="text-sm uppercase tracking-wide text-gray-500 mb-2">
             Thèse économique
@@ -182,22 +336,45 @@ export function OpportunityDetail({ opportunity, onClose, onStartSourcing, isDem
             <p className={autoThesis ? 'text-indigo-800' : 'text-gray-800'}>
               {autoThesis?.thesis || thesis}
             </p>
-            {autoThesis?.confidence && (
-              <div className="mt-2 text-xs text-indigo-600">
-                Confiance: {(autoThesis.confidence * 100).toFixed(0)}%
-              </div>
+            {/* V3.1: Always show "but" */}
+            <div className="mt-3 pt-3 border-t border-gray-200">
+              <p className="text-sm text-gray-600 italic">
+                <strong>Mais :</strong> {whatWeDontKnow.slice(0, 2).join(', ')}.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Action - V3.1: Conditional, not absolute */}
+        <div className="mb-6">
+          <h3 className="text-sm uppercase tracking-wide text-gray-500 mb-2">
+            {confidenceLevel === 'eclaire' ? 'GO conditionnel' : 'Avant de décider'}
+          </h3>
+          <div className={`rounded-xl p-4 border ${
+            confidenceLevel === 'eclaire'
+              ? 'bg-emerald-50 border-emerald-200'
+              : 'bg-amber-50 border-amber-200'
+          }`}>
+            <p className={`font-medium ${
+              confidenceLevel === 'eclaire' ? 'text-emerald-900' : 'text-amber-900'
+            }`}>
+              {autoThesis?.actionRecommendation || actionRecommendation}
+            </p>
+            {confidenceLevel !== 'eclaire' && (
+              <p className="text-sm text-amber-700 mt-2">
+                ⚠️ Analyse incomplète. Validations supplémentaires recommandées avant de lancer.
+              </p>
             )}
           </div>
         </div>
 
-        {/* Action - show auto-generated if available */}
-        <div className="mb-6">
-          <h3 className="text-sm uppercase tracking-wide text-gray-500 mb-2">Action recommandée</h3>
-          <div className="bg-amber-50 rounded-xl p-4 border border-amber-200">
-            <p className="text-amber-900 font-medium">
-              {autoThesis?.actionRecommendation || actionRecommendation}
-            </p>
-          </div>
+        {/* V3.1: Key insight */}
+        <div className="mb-6 p-4 bg-slate-100 rounded-xl border border-slate-200">
+          <p className="text-sm text-slate-700 text-center italic">
+            👉 Votre avantage ne vient pas du score.
+            <br />
+            Il vient de votre capacité à agir là où les autres ne regardent pas.
+          </p>
         </div>
 
         {/* Review Intelligence Panel */}
@@ -297,19 +474,27 @@ export function OpportunityDetail({ opportunity, onClose, onStartSourcing, isDem
         </div>
       </div>
 
-      {/* Action buttons */}
+      {/* Action buttons - V3.1: Context-aware */}
       <div className="border-t border-gray-200 p-4 bg-gray-50 flex gap-3">
         {isDemo && (
           <div className="flex-1 bg-gray-200 text-gray-500 py-3 px-4 rounded-lg font-medium text-center cursor-not-allowed">
             Sourcing désactivé (mode démo)
           </div>
         )}
-        {!isDemo && (
+        {!isDemo && confidenceLevel === 'eclaire' && (
           <button
             onClick={onStartSourcing}
-            className="flex-1 bg-primary-600 text-white py-3 px-4 rounded-lg font-medium hover:bg-primary-700 transition-colors"
+            className="flex-1 bg-emerald-600 text-white py-3 px-4 rounded-lg font-medium hover:bg-emerald-700 transition-colors"
           >
             Lancer le sourcing
+          </button>
+        )}
+        {!isDemo && confidenceLevel !== 'eclaire' && (
+          <button
+            onClick={handleProceedAnyway}
+            className="flex-1 bg-amber-500 text-white py-3 px-4 rounded-lg font-medium hover:bg-amber-600 transition-colors"
+          >
+            ⚠️ Je veux quand même avancer
           </button>
         )}
         <button
@@ -320,7 +505,7 @@ export function OpportunityDetail({ opportunity, onClose, onStartSourcing, isDem
               : 'border-gray-300 text-gray-700 hover:bg-gray-100'
           }`}
         >
-          {isSaved ? 'Sauvegarde' : 'Sauvegarder'}
+          {isSaved ? 'Sauvegardé' : 'Sauvegarder'}
         </button>
         {onClose && (
           <button
@@ -331,6 +516,17 @@ export function OpportunityDetail({ opportunity, onClose, onStartSourcing, isDem
           </button>
         )}
       </div>
+
+      {/* Risk Override Modal */}
+      {showRiskModal && (
+        <RiskOverrideModal
+          asin={asin}
+          confidenceLevel={confidenceLevel}
+          missingInfo={whatWeDontKnow}
+          onConfirm={handleRiskConfirm}
+          onCancel={() => setShowRiskModal(false)}
+        />
+      )}
     </div>
   );
 }

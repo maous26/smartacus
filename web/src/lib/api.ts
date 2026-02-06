@@ -614,6 +614,80 @@ export const api = {
       })),
     };
   },
+
+  // ===========================================================================
+  // RISK JOURNAL ENDPOINTS
+  // ===========================================================================
+
+  /**
+   * Create a risk override when user proceeds despite incomplete analysis
+   */
+  async createRiskOverride(data: {
+    asin: string;
+    confidenceLevel: string;
+    hypothesis: string;
+    hypothesisReason: string;
+    missingInfo: string[];
+    runId?: string;
+    userId?: string;
+  }): Promise<{ id: string; message: string }> {
+    return fetchApi<{ id: string; message: string }>('/api/risk/overrides', {
+      method: 'POST',
+      body: JSON.stringify({
+        asin: data.asin,
+        confidence_level: data.confidenceLevel,
+        hypothesis: data.hypothesis,
+        hypothesis_reason: data.hypothesisReason,
+        missing_info: data.missingInfo,
+        run_id: data.runId,
+        user_id: data.userId || 'default',
+      }),
+    });
+  },
+
+  /**
+   * Get risk overrides for an ASIN
+   */
+  async getRiskOverrides(asin: string): Promise<Array<{
+    id: string;
+    hypothesis: string;
+    hypothesisReason: string;
+    confidenceLevel: string;
+    outcome: string | null;
+    createdAt: string;
+  }>> {
+    const response = await fetchApi<Array<{
+      id: string;
+      hypothesis: string;
+      hypothesis_reason: string;
+      confidence_level: string;
+      outcome: string | null;
+      created_at: string;
+    }>>(`/api/risk/overrides/${asin}`);
+
+    return response.map((r) => ({
+      id: r.id,
+      hypothesis: r.hypothesis,
+      hypothesisReason: r.hypothesis_reason,
+      confidenceLevel: r.confidence_level,
+      outcome: r.outcome,
+      createdAt: r.created_at,
+    }));
+  },
+
+  /**
+   * Record outcome for a risk override
+   */
+  async recordRiskOutcome(
+    overrideId: string,
+    outcome: 'success' | 'partial' | 'failure' | 'abandoned',
+    notes?: string,
+  ): Promise<{ message: string }> {
+    return fetchApi<{ message: string }>(`/api/risk/overrides/${overrideId}/outcome`, {
+      method: 'PATCH',
+      body: JSON.stringify({ outcome, notes }),
+    });
+  },
 };
 
 export default api;
