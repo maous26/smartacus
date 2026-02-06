@@ -321,6 +321,8 @@ def run_controlled(
     skip_filter: bool = False,
     verbose: bool = False,
     explicit_asins: Optional[List[str]] = None,
+    category_id: Optional[int] = None,
+    domain: Optional[str] = None,
 ):
     """
     Execute a controlled pipeline run with full audit trail.
@@ -385,7 +387,21 @@ def run_controlled(
     try:
         from src.data.config import get_settings
         settings = get_settings()
-        print(f"  [OK] Config loaded: category={settings.ingestion.category_node_id}")
+
+        # Override category and domain if specified
+        if category_id:
+            settings.ingestion.category_node_id = category_id
+            print(f"  [OK] Category override: {category_id}")
+        if domain:
+            # Map domain string to Keepa domain ID
+            domain_map = {"com": 1, "uk": 2, "de": 3, "fr": 4, "jp": 5, "ca": 6, "it": 8, "es": 9}
+            if domain.lower() in domain_map:
+                settings.keepa.domain_id = domain_map[domain.lower()]
+                print(f"  [OK] Domain override: {domain} (ID: {domain_map[domain.lower()]})")
+            else:
+                print(f"  [WARN] Unknown domain '{domain}', using default")
+
+        print(f"  [OK] Config loaded: category={settings.ingestion.category_node_id}, domain_id={settings.keepa.domain_id}")
     except Exception as e:
         print(f"  [FAIL] Config error: {e}")
         return 1
@@ -1249,6 +1265,8 @@ def main():
     parser.add_argument("--skip-discovery", action="store_true", help="Use existing DB ASINs instead of Keepa discovery")
     parser.add_argument("--skip-filter", action="store_true", help="Skip criteria filtering")
     parser.add_argument("--asins", type=str, default=None, help="Comma-separated ASINs to use (skips discovery)")
+    parser.add_argument("--category", type=int, default=None, help="Amazon category node ID to scan (overrides config)")
+    parser.add_argument("--domain", type=str, default=None, help="Amazon domain: com, fr, de, uk, etc. (overrides config)")
     parser.add_argument("--freeze", action="store_true", default=True, help="Freeze mode: score but don't promote to shortlist (default: True)")
     parser.add_argument("--no-freeze", action="store_true", help="Disable freeze mode: promote scored items to shortlist")
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
@@ -1268,6 +1286,8 @@ def main():
         skip_filter=args.skip_filter,
         verbose=args.verbose,
         explicit_asins=explicit_asins,
+        category_id=args.category,
+        domain=args.domain,
     )
 
 
