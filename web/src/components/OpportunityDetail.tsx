@@ -7,6 +7,17 @@ import { ScoreRing } from './ScoreRing';
 import { ReviewInsightPanel } from './ReviewInsightPanel';
 import { ProductSpecPanel } from './ProductSpecPanel';
 import { formatNumber, formatPrice, formatCurrency, formatDate } from '@/lib/format';
+import { api } from '@/lib/api';
+
+interface AutoThesis {
+  headline: string | null;
+  thesis: string;
+  confidence: number | null;
+  urgency: string | null;
+  actionRecommendation: string | null;
+  economicEstimates: Record<string, number> | null;
+  generatedAt: string | null;
+}
 
 interface OpportunityDetailProps {
   opportunity: Opportunity;
@@ -68,11 +79,18 @@ export function OpportunityDetail({ opportunity, onClose, onStartSourcing, isDem
   } = opportunity;
 
   const [isSaved, setIsSaved] = useState(false);
+  const [autoThesis, setAutoThesis] = useState<AutoThesis | null>(null);
 
   useEffect(() => {
     const saved = JSON.parse(localStorage.getItem('smartacus_saved') || '[]') as string[];
     setIsSaved(saved.includes(asin));
   }, [asin]);
+
+  // Fetch auto-generated thesis if available
+  useEffect(() => {
+    if (isDemo) return;
+    api.getAutoThesis(asin).then(setAutoThesis).catch(() => setAutoThesis(null));
+  }, [asin, isDemo]);
 
   const handleSave = () => {
     const saved = JSON.parse(localStorage.getItem('smartacus_saved') || '[]') as string[];
@@ -147,19 +165,38 @@ export function OpportunityDetail({ opportunity, onClose, onStartSourcing, isDem
           </div>
         </div>
 
-        {/* Thèse */}
+        {/* Thèse - show auto-generated if available */}
         <div className="mb-6">
-          <h3 className="text-sm uppercase tracking-wide text-gray-500 mb-2">Thèse économique</h3>
-          <div className="bg-gray-50 rounded-xl p-4 border border-gray-200">
-            <p className="text-gray-800">{thesis}</p>
+          <h3 className="text-sm uppercase tracking-wide text-gray-500 mb-2">
+            Thèse économique
+            {autoThesis && (
+              <span className="ml-2 text-xs bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full font-normal">
+                Auto-générée
+              </span>
+            )}
+          </h3>
+          <div className={`rounded-xl p-4 border ${autoThesis ? 'bg-indigo-50 border-indigo-200' : 'bg-gray-50 border-gray-200'}`}>
+            {autoThesis?.headline && (
+              <div className="font-semibold text-indigo-900 mb-2">{autoThesis.headline}</div>
+            )}
+            <p className={autoThesis ? 'text-indigo-800' : 'text-gray-800'}>
+              {autoThesis?.thesis || thesis}
+            </p>
+            {autoThesis?.confidence && (
+              <div className="mt-2 text-xs text-indigo-600">
+                Confiance: {(autoThesis.confidence * 100).toFixed(0)}%
+              </div>
+            )}
           </div>
         </div>
 
-        {/* Action */}
+        {/* Action - show auto-generated if available */}
         <div className="mb-6">
           <h3 className="text-sm uppercase tracking-wide text-gray-500 mb-2">Action recommandée</h3>
           <div className="bg-amber-50 rounded-xl p-4 border border-amber-200">
-            <p className="text-amber-900 font-medium">{actionRecommendation}</p>
+            <p className="text-amber-900 font-medium">
+              {autoThesis?.actionRecommendation || actionRecommendation}
+            </p>
           </div>
         </div>
 

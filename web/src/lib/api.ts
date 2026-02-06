@@ -526,6 +526,43 @@ export const api = {
   // REVIEW INTELLIGENCE ENDPOINTS
   // ===========================================================================
 
+  /**
+   * Get auto-generated thesis from opportunity_theses table
+   */
+  async getAutoThesis(asin: string): Promise<{
+    headline: string | null;
+    thesis: string;
+    confidence: number | null;
+    urgency: string | null;
+    actionRecommendation: string | null;
+    economicEstimates: Record<string, number> | null;
+    generatedAt: string | null;
+  } | null> {
+    try {
+      const response = await fetchApi<{
+        headline: string | null;
+        thesis: string;
+        confidence: number | null;
+        urgency: string | null;
+        action_recommendation: string | null;
+        economic_estimates: Record<string, number> | null;
+        generated_at: string | null;
+      }>(`/api/thesis/${asin}`);
+
+      return {
+        headline: response.headline,
+        thesis: response.thesis,
+        confidence: response.confidence,
+        urgency: response.urgency,
+        actionRecommendation: response.action_recommendation,
+        economicEstimates: response.economic_estimates,
+        generatedAt: response.generated_at,
+      };
+    } catch {
+      return null;
+    }
+  },
+
   async getReviewProfile(asin: string): Promise<ReviewProfile> {
     const response = await fetchApi<{
       asin: string;

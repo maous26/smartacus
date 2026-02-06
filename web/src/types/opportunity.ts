@@ -18,7 +18,7 @@ export interface EconomicEvent {
   eventType: string;
   thesis: string;
   confidence: 'weak' | 'moderate' | 'strong' | 'confirmed';
-  urgency: UrgencyLevel;
+  urgency: UrgencyLevel | 'high' | 'medium' | 'low';  // V2.0: backend may send high/medium/low
 }
 
 export interface Opportunity {

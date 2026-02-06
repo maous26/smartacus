@@ -31,7 +31,13 @@ export function OpportunityCard({
     amazonPrice,
     reviewCount,
     rating,
+    economicEvents,
   } = opportunity;
+
+  // Get most urgent event for badge display
+  const urgentEvent = economicEvents?.find(
+    (e) => e.urgency === 'critical' || e.urgency === 'urgent' || e.urgency === 'high'
+  ) || economicEvents?.[0];
 
   return (
     <div
@@ -72,9 +78,23 @@ export function OpportunityCard({
         <ScoreRing score={finalScore} size="md" />
       </div>
 
-      {/* Urgency badge */}
-      <div className="mb-4">
+      {/* Urgency badge + Event badge */}
+      <div className="mb-4 flex items-center gap-2 flex-wrap">
         <UrgencyBadge level={urgencyLevel} windowDays={windowDays} />
+        {urgentEvent && (
+          <span className={`
+            inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium
+            ${urgentEvent.urgency === 'critical' || urgentEvent.urgency === 'high'
+              ? 'bg-red-100 text-red-700 border border-red-200'
+              : urgentEvent.urgency === 'urgent' || urgentEvent.urgency === 'medium'
+              ? 'bg-orange-100 text-orange-700 border border-orange-200'
+              : 'bg-purple-100 text-purple-700 border border-purple-200'
+            }
+          `}>
+            <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
+            {urgentEvent.eventType.replace('_', ' ')}
+          </span>
+        )}
       </div>
 
       {/* Value */}
