@@ -3,7 +3,7 @@ Review Intelligence API Routes
 ================================
 
 GET  /api/reviews/{asin}/profile — returns full ProductImprovementProfile as JSON.
-POST /api/reviews/{asin}/backfill — fetch reviews from Oxylabs and run analysis.
+POST /api/reviews/{asin}/backfill — fetch reviews from Outscraper and run analysis.
 """
 
 import logging
@@ -111,7 +111,6 @@ async def get_review_profile(asin: str):
 class BackfillRequest(BaseModel):
     domain: str = "fr"
     force: bool = False  # Force refresh even if fresh reviews exist
-    source: str = "outscraper"  # "outscraper" (default) or "oxylabs"
 
 
 class BackfillResponse(BaseModel):
@@ -129,14 +128,13 @@ class BackfillResponse(BaseModel):
 _backfill_in_progress: set = set()
 
 
-def _run_backfill_sync(asin: str, domain: str, source: str = "outscraper") -> dict:
+def _run_backfill_sync(asin: str, domain: str) -> dict:
     """
-    Synchronous backfill function that fetches reviews and runs analysis.
+    Synchronous backfill function that fetches reviews via Outscraper and runs analysis.
 
     Args:
         asin: Amazon product ASIN
         domain: Amazon domain (fr, com, de, etc.)
-        source: API source - "outscraper" (default, up to 100 reviews) or "oxylabs" (7-10 reviews)
 
     Returns dict with results.
     """
@@ -149,43 +147,25 @@ def _run_backfill_sync(asin: str, domain: str, source: str = "outscraper") -> di
         "reviews_inserted": 0,
         "reviews_updated": 0,
         "analysis_triggered": False,
-        "source": source,
         "error": None,
     }
 
     try:
-        reviews = []
+        from src.data.outscraper_client import OutscraperClient, OutscraperError
 
-        # Try Outscraper first (default), fallback to Oxylabs
-        if source == "outscraper":
-            try:
-                from src.data.outscraper_client import OutscraperClient, OutscraperError
+        api_key = os.getenv("OUTSCRAPER_API_KEY")
+        if not api_key:
+            result["error"] = "OUTSCRAPER_API_KEY not configured in .env"
+            return result
 
-                api_key = os.getenv("OUTSCRAPER_API_KEY")
-                if not api_key:
-                    logger.warning("Outscraper API key not configured, falling back to Oxylabs")
-                    source = "oxylabs"
-                else:
-                    client = OutscraperClient(api_key=api_key)
-                    reviews = client.fetch_product_reviews(asin, domain=domain, max_reviews=100)
-                    result["source"] = "outscraper"
-
-            except Exception as e:
-                logger.warning(f"Outscraper failed: {e}, falling back to Oxylabs")
-                source = "oxylabs"
-
-        if source == "oxylabs" and not reviews:
-            from src.data.oxylabs_client import OxylabsClient, OxylabsError
-
-            username = os.getenv("OXYLABS_USERNAME")
-            password = os.getenv("OXYLABS_PASSWORD")
-            if not username or not password:
-                result["error"] = "No review scraping API configured (need OUTSCRAPER_API_KEY or OXYLABS credentials)"
-                return result
-
-            client = OxylabsClient(username=username, password=password)
-            reviews = client.fetch_product_reviews(asin, domain=domain)
-            result["source"] = "oxylabs"
+        client = OutscraperClient(api_key=api_key)
+        reviews = client.fetch_product_reviews(
+            asin,
+            domain=domain,
+            max_reviews=15,
+            target_negative=10,
+            target_positive=5,
+        )
 
         result["reviews_fetched"] = len(reviews)
 
@@ -282,13 +262,9 @@ async def backfill_reviews(
     background_tasks: BackgroundTasks = None,
 ):
     """
-    Fetch reviews for an ASIN from Oxylabs and run Review Intelligence analysis.
+    Fetch reviews for an ASIN from Outscraper and run Review Intelligence analysis.
 
-    This endpoint:
-    1. Fetches reviews from Amazon via Oxylabs API
-    2. Saves them to the reviews table
-    3. Runs Review Intelligence analysis
-    4. Returns the updated profile
+    Uses star-filtered async API: 10 negative (1-3 stars) + 5 positive (4-5 stars).
 
     Args:
         asin: Amazon product ASIN
@@ -384,8 +360,8 @@ async def backfill_reviews(
     _backfill_in_progress.add(asin)
 
     try:
-        # Run backfill synchronously (Outscraper or Oxylabs)
-        result = _run_backfill_sync(asin, request.domain, request.source)
+        # Run backfill synchronously via Outscraper
+        result = _run_backfill_sync(asin, request.domain)
 
         if result.get("error"):
             return BackfillResponse(
