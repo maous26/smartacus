@@ -153,12 +153,11 @@ def _run_backfill_sync(asin: str, domain: str) -> dict:
     try:
         from src.data.outscraper_client import OutscraperClient, OutscraperError
 
-        api_key = os.getenv("OUTSCRAPER_API_KEY")
-        if not api_key:
-            result["error"] = "OUTSCRAPER_API_KEY not configured in .env"
+        if not os.getenv("APIFY_TOKEN"):
+            result["error"] = "APIFY_TOKEN not configured"
             return result
 
-        client = OutscraperClient(api_key=api_key)
+        client = OutscraperClient()
         reviews = client.fetch_product_reviews(
             asin,
             domain=domain,

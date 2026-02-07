@@ -83,7 +83,7 @@ def main():
 
     from src.data.outscraper_client import OutscraperClient, OutscraperError
 
-    client = OutscraperClient(api_key=api_key)
+    client = OutscraperClient()  # Uses APIFY_TOKEN env var
     success_count = 0
     error_count = 0
 
