@@ -87,7 +87,38 @@ export function ReviewInsightPanel({ asin, isDemo = false }: ReviewInsightPanelP
     );
   }
   if (error) return null;
-  if (!profile || !profile.reviewsReady || profile.topDefects.length === 0) return null;
+  if (!profile || !profile.reviewsReady) return null;
+
+  // If no defects found, show informative message instead of hiding
+  if (profile.topDefects.length === 0) {
+    return (
+      <div className="mb-6" data-panel="reviews">
+        <h3 className="text-sm uppercase tracking-wide text-gray-500 mb-3">
+          Intelligence Reviews
+          <span className="text-xs font-normal text-gray-400 ml-2">
+            {profile.reviewsAnalyzed} avis &middot; {profile.negativeReviewsAnalyzed} négatifs
+          </span>
+        </h3>
+        <div className="bg-white rounded-xl border border-gray-200 p-5">
+          <div className="flex items-start gap-3">
+            <span className="text-2xl">✅</span>
+            <div>
+              <p className="text-sm font-semibold text-gray-800 mb-1">
+                Aucun défaut récurrent détecté
+              </p>
+              <p className="text-xs text-gray-500">
+                Sur {profile.reviewsAnalyzed} avis analysés ({profile.negativeReviewsAnalyzed} négatifs),
+                aucun pattern de défaut récurrent n&apos;a été identifié.
+                {profile.negativeReviewsAnalyzed <= 2
+                  ? ' Peu d\'avis négatifs disponibles — la satisfaction client semble élevée pour ce produit.'
+                  : ' Les plaintes sont variées sans tendance dominante exploitable.'}
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   const painColors = PAIN_COLORS[profile.dominantPain || ''] || 'bg-gray-100 text-gray-700 border-gray-300';
 

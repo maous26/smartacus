@@ -8,11 +8,12 @@ Configuration:
     OUTSCRAPER_API_KEY: Outscraper API key (from .env)
 
 Strategy:
-    Fetch 15 reviews with CONTROLLED mix using async API + star filters:
-    - 10 negative (1-3 stars) for defect detection
-    - 5 positive (4-5 stars) for "I wish..." patterns
+    Fetch a large batch of recent reviews (up to 50), then client-side
+    split into negative (1-3★) and positive (4-5★) to build a controlled mix.
 
-    The async API (HTTP 202) allows filterByStar which the SDK doesn't support.
+    NOTE: Outscraper's filterByStar parameter is unreliable on non-US domains
+    (returns unfiltered results regardless of value). We therefore fetch ALL
+    reviews and filter locally.
 """
 
 import os
@@ -21,7 +22,7 @@ import time
 import requests
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
@@ -46,27 +47,13 @@ class OutscraperError(Exception):
     pass
 
 
-# Star filter values for Outscraper API
-STAR_FILTERS = {
-    "critical": "critical",      # 1-3 stars
-    "positive": "positive",      # 4-5 stars
-    "one_star": "one_star",
-    "two_star": "two_star",
-    "three_star": "three_star",
-    "four_star": "four_star",
-    "five_star": "five_star",
-    "all_stars": "all_stars",
-}
-
 
 class OutscraperClient:
     """
     Client for Outscraper Amazon Reviews API using async jobs.
 
-    Strategy: Fetch 15 reviews with controlled mix:
-    - Submit 2 async jobs: one for critical (1-3★), one for positive (4-5★)
-    - Poll until completion
-    - Merge and deduplicate
+    Strategy: Fetch a large batch (up to 50), then client-side filter
+    to build a balanced mix of negative and positive reviews.
     """
 
     API_BASE = "https://api.app.outscraper.com"
@@ -100,7 +87,7 @@ class OutscraperClient:
         asin: str,
         domain: str,
         limit: int,
-        filter_by_star: str,
+        filter_by_star: Optional[str] = None,
         sort: str = "recent",
     ) -> str:
         """
@@ -114,9 +101,10 @@ class OutscraperClient:
             "query": f"https://www.amazon.{domain}/dp/{asin}",
             "limit": limit,
             "sort": sort,
-            "filterByStar": filter_by_star,
             "async": "true",  # Force async mode
         }
+        if filter_by_star:
+            params["filterByStar"] = filter_by_star
 
         response = requests.get(url, params=params, headers=self._get_headers(), timeout=30)
         self._requests_made += 1
@@ -201,9 +189,9 @@ class OutscraperClient:
         """
         Fetch product reviews with controlled star mix.
 
-        Uses async API to get:
-        - Up to target_negative reviews (1-3★) for defect detection
-        - Up to target_positive reviews (4-5★) for "I wish..." patterns
+        Strategy: Outscraper's filterByStar is unreliable on non-US domains,
+        so we fetch a large batch of ALL reviews and client-side filter to
+        build a balanced mix of negative (1-3★) and positive (4-5★).
 
         Args:
             asin: Amazon product ASIN
@@ -215,66 +203,73 @@ class OutscraperClient:
         Returns:
             List of Review objects with controlled mix
         """
-        logger.info(f"Fetching reviews for {asin} (target: {target_negative} neg + {target_positive} pos)")
+        # Fetch more reviews than needed so we can filter client-side.
+        # Negative reviews are typically 10-25% of all reviews, so fetch
+        # enough to find them.
+        fetch_limit = max(50, (target_negative + target_positive) * 4)
+
+        logger.info(
+            f"Fetching reviews for {asin} on amazon.{domain} "
+            f"(fetching {fetch_limit}, target: {target_negative} neg + {target_positive} pos)"
+        )
 
         try:
-            # Submit both jobs in parallel
-            job_critical = self._submit_reviews_job(
+            # Single job — no star filter (unreliable), fetch all recent reviews
+            job_id = self._submit_reviews_job(
                 asin=asin,
                 domain=domain,
-                limit=target_negative,
-                filter_by_star="critical",  # 1-3 stars
+                limit=fetch_limit,
                 sort="recent",
             )
 
-            # Small delay to avoid rate limiting
-            time.sleep(0.5)
+            logger.info(f"Polling job {job_id} for {asin}...")
+            raw_reviews = self._poll_job(job_id)
 
-            job_positive = self._submit_reviews_job(
-                asin=asin,
-                domain=domain,
-                limit=target_positive,
-                filter_by_star="positive",  # 4-5 stars
-                sort="helpful",
+            # Parse all reviews
+            all_reviews = self._parse_reviews(raw_reviews, asin, domain)
+            logger.info(f"Parsed {len(all_reviews)} reviews for {asin}")
+
+            # Client-side split by rating
+            negative = [r for r in all_reviews if r.rating <= 3]
+            positive = [r for r in all_reviews if r.rating >= 4]
+
+            logger.info(
+                f"Rating split for {asin}: {len(negative)} negative (1-3★), "
+                f"{len(positive)} positive (4-5★) out of {len(all_reviews)} total"
             )
 
-            # Poll both jobs
-            logger.info(f"Polling jobs: critical={job_critical}, positive={job_positive}")
-
-            raw_negative = self._poll_job(job_critical)
-            raw_positive = self._poll_job(job_positive)
-
-            # Parse reviews
-            negative_reviews = self._parse_reviews(raw_negative, asin, domain)
-            positive_reviews = self._parse_reviews(raw_positive, asin, domain)
-
-            # Deduplicate by review_id
+            # Build balanced mix: prioritize negatives, fill with positives
             seen_ids = set()
             final_reviews = []
 
-            # Add negatives first (priority)
-            for r in negative_reviews[:target_negative]:
+            for r in negative[:target_negative]:
                 if r.review_id not in seen_ids:
                     seen_ids.add(r.review_id)
                     final_reviews.append(r)
 
-            # Add positives
-            for r in positive_reviews[:target_positive]:
+            for r in positive[:target_positive]:
                 if r.review_id not in seen_ids:
                     seen_ids.add(r.review_id)
                     final_reviews.append(r)
 
-            # Limit to max
+            # If we didn't get enough negatives, backfill with more positives
+            if len(final_reviews) < max_reviews:
+                remaining = max_reviews - len(final_reviews)
+                for r in positive[target_positive:target_positive + remaining]:
+                    if r.review_id not in seen_ids:
+                        seen_ids.add(r.review_id)
+                        final_reviews.append(r)
+
             final_reviews = final_reviews[:max_reviews]
-
             self._reviews_fetched += len(final_reviews)
 
             neg_count = sum(1 for r in final_reviews if r.rating <= 3)
             pos_count = sum(1 for r in final_reviews if r.rating >= 4)
 
             logger.info(
-                f"Outscraper async: {asin} - {len(final_reviews)} reviews "
-                f"({neg_count} negative, {pos_count} positive)"
+                f"Outscraper result: {asin} - {len(final_reviews)} reviews "
+                f"({neg_count} negative, {pos_count} positive) "
+                f"[from {len(all_reviews)} fetched]"
             )
 
             return final_reviews
@@ -339,11 +334,19 @@ class OutscraperClient:
                 badge = raw.get("badge", "") or raw.get("bage", "") or ""
                 verified = "verified" in str(badge).lower() or "achat" in str(badge).lower()
 
+                # Clean body: Outscraper sometimes returns Amazon JS instead of text
+                body = raw.get("body", "")
+                if body and ("function()" in body or "P.when(" in body):
+                    body = ""  # Discard JS-contaminated content
+                # Strip Amazon's "Lire la suite" / "Read more" suffix
+                if body:
+                    body = body.replace("Lire la suite", "").replace("Read more", "").strip()
+
                 review = Review(
                     review_id=review_id,
                     asin=raw.get("product_asin", asin),
                     title=raw.get("title", ""),
-                    content=raw.get("body", ""),
+                    content=body,
                     rating=rating,
                     author=raw.get("author_title", "") or raw.get("author", ""),
                     date=review_date,
@@ -406,20 +409,18 @@ class OutscraperClient:
 
 
 def test_outscraper_client():
-    """Quick test of Outscraper async client."""
+    """Quick test of Outscraper client with client-side filtering."""
     import sys
 
-    # Enable debug logging
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
     try:
         client = OutscraperClient()
-        print("Outscraper client initialized (async API)")
+        print("Outscraper client initialized")
 
-        # Test with a known ASIN
         asin = sys.argv[1] if len(sys.argv) > 1 else "B07KY1XKRQ"
         print(f"\nFetching reviews for {asin}...")
-        print("(This may take 30-60 seconds for async jobs to complete)\n")
+        print("(Fetching large batch + client-side filtering)\n")
 
         reviews = client.fetch_product_reviews(
             asin,
@@ -436,21 +437,24 @@ def test_outscraper_client():
         positive = [r for r in reviews if r.rating >= 4]
 
         print(f"Total: {len(reviews)} reviews")
-        print(f"  - {len(negative)} negative (1-3★)")
-        print(f"  - {len(positive)} positive (4-5★)")
+        print(f"  - {len(negative)} negative (1-3 stars)")
+        print(f"  - {len(positive)} positive (4-5 stars)")
 
         if negative:
             print(f"\nNegative reviews ({len(negative)}):")
             for r in negative[:5]:
-                stars = "★" * r.rating + "☆" * (5 - r.rating)
-                title = r.title[:40] if r.title else "(no title)"
+                stars = "*" * r.rating + "." * (5 - r.rating)
+                title = r.title[:50] if r.title else "(no title)"
+                body = r.content[:80] if r.content else ""
                 print(f"  [{stars}] {title}")
+                if body:
+                    print(f"           {body}")
 
         if positive:
             print(f"\nPositive reviews ({len(positive)}):")
             for r in positive[:3]:
-                stars = "★" * r.rating + "☆" * (5 - r.rating)
-                title = r.title[:40] if r.title else "(no title)"
+                stars = "*" * r.rating + "." * (5 - r.rating)
+                title = r.title[:50] if r.title else "(no title)"
                 print(f"  [{stars}] {title}")
 
         stats = client.get_stats()
