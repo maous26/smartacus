@@ -83,7 +83,7 @@ def main():
 
     from src.data.outscraper_client import OutscraperClient, OutscraperError
 
-    client = OutscraperClient(api_key=api_key)
+    client = OutscraperClient()  # Uses OXYLABS_USERNAME/PASSWORD env vars
     success_count = 0
     error_count = 0
 
