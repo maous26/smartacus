@@ -20,8 +20,27 @@ import { UrgencyBadge } from './UrgencyBadge';
 import { ScoreRing } from './ScoreRing';
 import { ReviewInsightPanel } from './ReviewInsightPanel';
 import { ProductSpecPanel } from './ProductSpecPanel';
-import { ConfidenceState, calculateConfidenceLevel, ConfidenceLevel } from './ConfidenceState';
+import { ConfidenceState, calculateConfidenceLevel, ConfidenceLevel, ConfidenceReasonCode } from './ConfidenceState';
 import { RiskOverrideModal, HypothesisReason } from './RiskOverrideModal';
+import { useToast } from './Toast';
+
+/**
+ * Map confidence reason codes to actionable reduction steps
+ */
+const UNCERTAINTY_REDUCTION_MAP: Record<ConfidenceReasonCode, { label: string; action: string } | null> = {
+  'CONF_REVIEWS_MISSING': { label: 'Lancer l\'analyse reviews', action: 'reviews' },
+  'CONF_REVIEWS_PARTIAL': { label: 'Collecter plus de reviews', action: 'reviews' },
+  'CONF_REVIEWS_OK': null,
+  'CONF_PAIN_MISSING': { label: 'Identifier les défauts produit', action: 'reviews' },
+  'CONF_PAIN_OK': null,
+  'CONF_SPEC_MISSING': { label: 'Générer la spec OEM', action: 'spec' },
+  'CONF_SPEC_OK': null,
+  'CONF_MARGIN_MISSING': { label: 'Valider les coûts sourcing', action: 'sourcing' },
+  'CONF_MARGIN_OK': null,
+  'CONF_VELOCITY_OK': null,
+  'CONF_DATA_PARTIAL': { label: 'Actualiser les données', action: 'refresh' },
+  'CONF_SIGNAL_CONTRADICT': { label: 'Analyser les contradictions', action: 'analyze' },
+};
 import { formatNumber, formatPrice, formatCurrency, formatDate } from '@/lib/format';
 import { api } from '@/lib/api';
 
@@ -98,14 +117,24 @@ export function OpportunityDetail({ opportunity, onClose, onStartSourcing, isDem
   const [reviewProfile, setReviewProfile] = useState<ReviewProfile | null>(null);
   const [hasSpecBundle, setHasSpecBundle] = useState(false);
   const [showRiskModal, setShowRiskModal] = useState(false);
+  const [isRegenerating, setIsRegenerating] = useState<string | null>(null); // Track which action is loading
+  const { showToast } = useToast();
 
-  // Calculate confidence state
-  const { level: confidenceLevel, reasons: confidenceReasons } = calculateConfidenceLevel(
+  // Calculate confidence state (V3.2: with reason codes)
+  const { level: confidenceLevel, reasons: confidenceReasons, codes: reasonCodes } = calculateConfidenceLevel(
     reviewProfile,
     hasSpecBundle,
     componentScores,
     finalScore
   );
+
+  // Get actionable uncertainty reductions
+  const uncertaintyReductions = reasonCodes
+    .map(code => UNCERTAINTY_REDUCTION_MAP[code])
+    .filter((item): item is { label: string; action: string } => item !== null);
+
+  // Primary uncertainty to resolve (first actionable item)
+  const primaryUncertainty = uncertaintyReductions[0] || null;
 
   useEffect(() => {
     const saved = JSON.parse(localStorage.getItem('smartacus_saved') || '[]') as string[];
@@ -151,14 +180,19 @@ export function OpportunityDetail({ opportunity, onClose, onStartSourcing, isDem
   };
 
   const handleRiskConfirm = async (hypothesis: string, reason: HypothesisReason) => {
-    // Log the risk override
+    // Log the risk override with reason codes (V3.2)
+    const missingReasons = confidenceReasons
+      .filter(r => !r.isPositive)
+      .map(r => r.label);
+
     try {
       await api.createRiskOverride({
         asin,
         confidenceLevel,
         hypothesis,
         hypothesisReason: reason,
-        missingInfo: confidenceReasons.filter(r => r.includes('non') || r.includes('partiel')),
+        missingInfo: missingReasons,
+        reasonCodes: reasonCodes, // V3.2: Include codes for analytics
       });
     } catch (e) {
       console.error('Failed to log risk override:', e);
@@ -167,6 +201,127 @@ export function OpportunityDetail({ opportunity, onClose, onStartSourcing, isDem
     setShowRiskModal(false);
     if (onStartSourcing) {
       onStartSourcing();
+    }
+  };
+
+  /**
+   * Handle "Reduce uncertainty" actions (V3.2)
+   * Now with real actions and toast feedback
+   */
+  const handleReduceUncertainty = async (action: string) => {
+    const scrollToPanel = (selector: string) => {
+      const panel = document.querySelector(selector);
+      if (panel) {
+        panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        // Highlight effect
+        panel.classList.add('ring-2', 'ring-blue-400', 'ring-offset-2');
+        setTimeout(() => {
+          panel.classList.remove('ring-2', 'ring-blue-400', 'ring-offset-2');
+        }, 2000);
+        return true;
+      }
+      return false;
+    };
+
+    switch (action) {
+      case 'reviews':
+        // Try to scroll to existing panel, or fetch reviews via API
+        if (scrollToPanel('[data-panel="reviews"]')) {
+          showToast('Analyse reviews disponible ci-dessous', 'success');
+        } else {
+          // Fetch reviews via API (V3.3)
+          setIsRegenerating('reviews');
+          showToast('Récupération des avis Amazon en cours...', 'info');
+          try {
+            const result = await api.backfillReviews(asin, { domain: 'fr' });
+            if (result.status === 'success') {
+              showToast(
+                `${result.reviewsFetched} avis récupérés et analysés !`,
+                'success'
+              );
+              // Reload review profile without page refresh (V3.3 fix)
+              if (result.profile) {
+                setReviewProfile(result.profile);
+              } else {
+                // Fallback: fetch fresh profile
+                const freshProfile = await api.getReviewProfile(asin);
+                setReviewProfile(freshProfile);
+              }
+              // Scroll to reviews panel after data is loaded
+              setTimeout(() => scrollToPanel('[data-panel="reviews"]'), 300);
+            } else if (result.status === 'skipped') {
+              showToast('Avis déjà récupérés récemment', 'info');
+              // Scroll to reviews panel if it appeared
+              setTimeout(() => scrollToPanel('[data-panel="reviews"]'), 500);
+            } else if (result.status === 'pending') {
+              showToast('Récupération déjà en cours...', 'info');
+            } else {
+              showToast(`Erreur: ${result.message}`, 'error');
+            }
+          } catch (e: any) {
+            showToast(
+              e.message?.includes('credentials')
+                ? 'API de scraping non configurée'
+                : 'Erreur lors de la récupération des avis',
+              'error'
+            );
+          } finally {
+            setIsRegenerating(null);
+          }
+        }
+        break;
+
+      case 'spec':
+        // Try to scroll to existing panel, or try to generate
+        if (scrollToPanel('[data-panel="spec"]')) {
+          showToast('Spec OEM disponible ci-dessous', 'success');
+        } else {
+          // Try to regenerate spec
+          setIsRegenerating('spec');
+          try {
+            await api.getSpecBundle(asin, { regenerate: true });
+            setHasSpecBundle(true);
+            showToast('Spec OEM générée !', 'success');
+            // Scroll to spec panel after state update
+            setTimeout(() => scrollToPanel('[data-panel="spec"]'), 300);
+          } catch (e: any) {
+            if (e.message?.includes('404') || e.message?.includes('not enough')) {
+              showToast(
+                'Spec OEM indisponible : il faut score ≥ 60 et reviews ≥ 20',
+                'warning'
+              );
+            } else {
+              showToast('Erreur lors de la génération de spec', 'error');
+            }
+          } finally {
+            setIsRegenerating(null);
+          }
+        }
+        break;
+
+      case 'sourcing':
+        // Open sourcing flow
+        if (onStartSourcing) {
+          onStartSourcing();
+        } else {
+          showToast('Lancez d\'abord l\'analyse complète avant le sourcing', 'info');
+        }
+        break;
+
+      case 'refresh':
+        showToast('Actualisation des données...', 'info');
+        setTimeout(() => window.location.reload(), 500);
+        break;
+
+      case 'analyze':
+        // Scroll to score breakdown
+        if (scrollToPanel('[data-panel="scores"]')) {
+          showToast('Analysez les composantes du score ci-dessous', 'info');
+        }
+        break;
+
+      default:
+        break;
     }
   };
 
@@ -385,9 +540,9 @@ export function OpportunityDetail({ opportunity, onClose, onStartSourcing, isDem
 
         {/* Score breakdown */}
         {componentScores && Object.keys(componentScores).length > 0 && (
-          <div className="mb-6">
+          <div className="mb-6" data-panel="scores">
             <h3 className="text-sm uppercase tracking-wide text-gray-500 mb-3">Décomposition du score</h3>
-            <div className="bg-gray-50 rounded-xl p-4 border border-gray-200">
+            <div className="bg-gray-50 rounded-xl p-4 border border-gray-200 transition-all duration-300">
               {Object.entries(componentScores).map(([name, comp]) => (
                 <ScoreBar
                   key={name}
@@ -474,47 +629,85 @@ export function OpportunityDetail({ opportunity, onClose, onStartSourcing, isDem
         </div>
       </div>
 
-      {/* Action buttons - V3.1: Context-aware */}
-      <div className="border-t border-gray-200 p-4 bg-gray-50 flex gap-3">
-        {isDemo && (
-          <div className="flex-1 bg-gray-200 text-gray-500 py-3 px-4 rounded-lg font-medium text-center cursor-not-allowed">
-            Sourcing désactivé (mode démo)
+      {/* Action buttons - V3.2: "Réduire l'incertitude" primary for incomplete states */}
+      <div className="border-t border-gray-200 p-4 bg-gray-50">
+        {/* V3.2: Show uncertainty reduction options for incomplete states */}
+        {!isDemo && confidenceLevel !== 'eclaire' && uncertaintyReductions.length > 0 && (
+          <div className="mb-3">
+            <div className="text-xs uppercase tracking-wide text-gray-500 mb-2">
+              Réduire l'incertitude
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {uncertaintyReductions.slice(0, 3).map((item, idx) => (
+                <button
+                  key={idx}
+                  onClick={() => handleReduceUncertainty(item.action)}
+                  disabled={isRegenerating === item.action}
+                  className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-wait ${
+                    idx === 0
+                      ? 'bg-blue-600 text-white hover:bg-blue-700'
+                      : 'bg-blue-100 text-blue-700 hover:bg-blue-200'
+                  }`}
+                >
+                  {isRegenerating === item.action ? (
+                    <span className="flex items-center gap-1">
+                      <span className="animate-spin">⏳</span> Chargement...
+                    </span>
+                  ) : (
+                    item.label
+                  )}
+                </button>
+              ))}
+            </div>
           </div>
         )}
-        {!isDemo && confidenceLevel === 'eclaire' && (
+
+        <div className="flex gap-3">
+          {isDemo && (
+            <div className="flex-1 bg-gray-200 text-gray-500 py-3 px-4 rounded-lg font-medium text-center cursor-not-allowed">
+              Sourcing désactivé (mode démo)
+            </div>
+          )}
+
+          {/* V3.2: Green state = GO button primary */}
+          {!isDemo && confidenceLevel === 'eclaire' && (
+            <button
+              onClick={onStartSourcing}
+              className="flex-1 bg-emerald-600 text-white py-3 px-4 rounded-lg font-medium hover:bg-emerald-700 transition-colors"
+            >
+              Lancer le sourcing
+            </button>
+          )}
+
+          {/* V3.2: Yellow/Red state = Primary action is "Réduire l'incertitude" (shown above), secondary is "Je veux quand même avancer" */}
+          {!isDemo && confidenceLevel !== 'eclaire' && (
+            <button
+              onClick={handleProceedAnyway}
+              className="flex-1 border border-amber-400 text-amber-700 bg-amber-50 py-3 px-4 rounded-lg font-medium hover:bg-amber-100 transition-colors"
+            >
+              Je veux quand même avancer →
+            </button>
+          )}
+
           <button
-            onClick={onStartSourcing}
-            className="flex-1 bg-emerald-600 text-white py-3 px-4 rounded-lg font-medium hover:bg-emerald-700 transition-colors"
+            onClick={handleSave}
+            className={`px-4 py-3 border rounded-lg font-medium transition-colors ${
+              isSaved
+                ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
+                : 'border-gray-300 text-gray-700 hover:bg-gray-100'
+            }`}
           >
-            Lancer le sourcing
+            {isSaved ? 'Sauvegardé' : 'Sauvegarder'}
           </button>
-        )}
-        {!isDemo && confidenceLevel !== 'eclaire' && (
-          <button
-            onClick={handleProceedAnyway}
-            className="flex-1 bg-amber-500 text-white py-3 px-4 rounded-lg font-medium hover:bg-amber-600 transition-colors"
-          >
-            ⚠️ Je veux quand même avancer
-          </button>
-        )}
-        <button
-          onClick={handleSave}
-          className={`px-4 py-3 border rounded-lg font-medium transition-colors ${
-            isSaved
-              ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
-              : 'border-gray-300 text-gray-700 hover:bg-gray-100'
-          }`}
-        >
-          {isSaved ? 'Sauvegardé' : 'Sauvegarder'}
-        </button>
-        {onClose && (
-          <button
-            onClick={onClose}
-            className="px-4 py-3 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-100 transition-colors"
-          >
-            Fermer
-          </button>
-        )}
+          {onClose && (
+            <button
+              onClick={onClose}
+              className="px-4 py-3 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-100 transition-colors"
+            >
+              Fermer
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Risk Override Modal */}

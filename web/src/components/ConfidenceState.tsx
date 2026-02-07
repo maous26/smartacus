@@ -12,17 +12,44 @@
  * - ÉCLAIRÉ (green): Key signals present, risks identified and measurable
  * - INCOMPLET (yellow): Positive signals but missing key info (default)
  * - FRAGILE (red): Insufficient or contradictory data
+ *
+ * V3.2: Added reason codes for metrics and debugging
  */
 
 import { ReviewProfile } from '@/types/opportunity';
 
 export type ConfidenceLevel = 'eclaire' | 'incomplet' | 'fragile';
 
+/**
+ * Reason codes for confidence calculation.
+ * Used for metrics, debugging, and explaining states.
+ */
+export type ConfidenceReasonCode =
+  | 'CONF_REVIEWS_MISSING'      // No reviews analyzed
+  | 'CONF_REVIEWS_PARTIAL'      // < 20 reviews
+  | 'CONF_REVIEWS_OK'           // >= 20 reviews
+  | 'CONF_PAIN_MISSING'         // No dominant pain identified
+  | 'CONF_PAIN_OK'              // Dominant pain identified
+  | 'CONF_SPEC_MISSING'         // No OEM spec generated
+  | 'CONF_SPEC_OK'              // OEM spec generated
+  | 'CONF_MARGIN_MISSING'       // Margin not validated
+  | 'CONF_MARGIN_OK'            // Margin data available
+  | 'CONF_VELOCITY_OK'          // Demand signals present
+  | 'CONF_DATA_PARTIAL'         // Economic data partial
+  | 'CONF_SIGNAL_CONTRADICT';   // Contradictory signals
+
+interface ReasonWithCode {
+  code: ConfidenceReasonCode;
+  label: string;
+  isPositive: boolean;
+}
+
 interface ConfidenceStateProps {
   level: ConfidenceLevel;
-  reasons: string[];
+  reasons: ReasonWithCode[];
   className?: string;
   expanded?: boolean;
+  showCodes?: boolean;  // For debugging
 }
 
 interface ConfidenceConfig {
@@ -61,8 +88,16 @@ const CONFIG: Record<ConfidenceLevel, ConfidenceConfig> = {
   },
 };
 
-export function ConfidenceState({ level, reasons, className = '', expanded = false }: ConfidenceStateProps) {
+export function ConfidenceState({
+  level,
+  reasons,
+  className = '',
+  expanded = false,
+  showCodes = false,
+}: ConfidenceStateProps) {
   const config = CONFIG[level];
+  const positiveReasons = reasons.filter(r => r.isPositive);
+  const negativeReasons = reasons.filter(r => !r.isPositive);
 
   return (
     <div className={`rounded-xl border ${config.bgColor} ${config.borderColor} ${className}`}>
@@ -80,18 +115,46 @@ export function ConfidenceState({ level, reasons, className = '', expanded = fal
           </p>
         )}
 
-        {reasons.length > 0 && (
+        {/* Show what's missing for non-green states */}
+        {negativeReasons.length > 0 && (
           <div className="mt-2">
             <div className={`text-xs uppercase tracking-wide ${config.color} opacity-70 mb-1`}>
-              {level === 'eclaire' ? 'Ce qui est solide' : 'Ce qui manque'}
+              Ce qui manque
             </div>
             <ul className="space-y-1">
-              {reasons.map((reason, idx) => (
+              {negativeReasons.map((reason, idx) => (
                 <li key={idx} className={`text-sm ${config.color} flex items-start gap-2`}>
-                  <span className="mt-1">
-                    {level === 'eclaire' ? '✓' : level === 'incomplet' ? '?' : '✗'}
+                  <span className="mt-0.5">
+                    {level === 'fragile' ? '✗' : '?'}
                   </span>
-                  {reason}
+                  <span>
+                    {reason.label}
+                    {showCodes && (
+                      <code className="ml-2 text-xs opacity-50">{reason.code}</code>
+                    )}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {/* Show what's solid for green state or if expanded */}
+        {(level === 'eclaire' || expanded) && positiveReasons.length > 0 && (
+          <div className="mt-2">
+            <div className={`text-xs uppercase tracking-wide ${config.color} opacity-70 mb-1`}>
+              Ce qui est solide
+            </div>
+            <ul className="space-y-1">
+              {positiveReasons.map((reason, idx) => (
+                <li key={idx} className={`text-sm ${config.color} flex items-start gap-2`}>
+                  <span className="mt-0.5 text-emerald-500">✓</span>
+                  <span>
+                    {reason.label}
+                    {showCodes && (
+                      <code className="ml-2 text-xs opacity-50">{reason.code}</code>
+                    )}
+                  </span>
                 </li>
               ))}
             </ul>
@@ -104,40 +167,69 @@ export function ConfidenceState({ level, reasons, className = '', expanded = fal
 
 /**
  * Calculate confidence level from opportunity data
+ * Returns structured reasons with codes for metrics
  */
 export function calculateConfidenceLevel(
   reviewProfile: ReviewProfile | null,
   hasSpecBundle: boolean,
   componentScores: Record<string, any> | undefined,
   finalScore: number,
-): { level: ConfidenceLevel; reasons: string[] } {
-  const reasons: string[] = [];
+): { level: ConfidenceLevel; reasons: ReasonWithCode[]; codes: ConfidenceReasonCode[] } {
+  const reasons: ReasonWithCode[] = [];
   let issues = 0;
 
   // Check reviews
   if (!reviewProfile || !reviewProfile.reviewsReady) {
-    reasons.push('Analyse reviews non effectuée');
+    reasons.push({
+      code: 'CONF_REVIEWS_MISSING',
+      label: 'Analyse reviews non effectuée',
+      isPositive: false,
+    });
     issues += 2;
   } else if (reviewProfile.reviewsAnalyzed < 20) {
-    reasons.push(`Reviews partiellement analysées (${reviewProfile.reviewsAnalyzed}/20 min.)`);
+    reasons.push({
+      code: 'CONF_REVIEWS_PARTIAL',
+      label: `Reviews partiellement analysées (${reviewProfile.reviewsAnalyzed}/20 min.)`,
+      isPositive: false,
+    });
     issues += 1;
   } else {
-    reasons.push(`${reviewProfile.reviewsAnalyzed} reviews analysés`);
+    reasons.push({
+      code: 'CONF_REVIEWS_OK',
+      label: `${reviewProfile.reviewsAnalyzed} reviews analysés`,
+      isPositive: true,
+    });
   }
 
   // Check product differentiation
   if (reviewProfile?.dominantPain) {
-    reasons.push(`Défaut dominant identifié: ${reviewProfile.dominantPain}`);
+    reasons.push({
+      code: 'CONF_PAIN_OK',
+      label: `Défaut dominant identifié: ${reviewProfile.dominantPain}`,
+      isPositive: true,
+    });
   } else {
-    reasons.push('Différenciation produit non validée');
+    reasons.push({
+      code: 'CONF_PAIN_MISSING',
+      label: 'Différenciation produit non validée',
+      isPositive: false,
+    });
     issues += 1;
   }
 
   // Check spec bundle
   if (hasSpecBundle) {
-    reasons.push('Spec OEM générée');
+    reasons.push({
+      code: 'CONF_SPEC_OK',
+      label: 'Spec OEM générée',
+      isPositive: true,
+    });
   } else {
-    reasons.push('Spec OEM non générée');
+    reasons.push({
+      code: 'CONF_SPEC_MISSING',
+      label: 'Spec OEM non générée',
+      isPositive: false,
+    });
     issues += 1;
   }
 
@@ -147,32 +239,61 @@ export function calculateConfidenceLevel(
     const velocity = componentScores['velocity'];
 
     if (margin && margin.score >= margin.maxScore * 0.5) {
-      reasons.push('Données prix/marge disponibles');
+      reasons.push({
+        code: 'CONF_MARGIN_OK',
+        label: 'Données prix/marge disponibles',
+        isPositive: true,
+      });
     } else {
-      reasons.push('Marge estimée (non validée)');
+      reasons.push({
+        code: 'CONF_MARGIN_MISSING',
+        label: 'Marge estimée (non validée)',
+        isPositive: false,
+      });
       issues += 1;
     }
 
     if (velocity && velocity.score >= velocity.maxScore * 0.3) {
-      reasons.push('Signaux de demande présents');
+      reasons.push({
+        code: 'CONF_VELOCITY_OK',
+        label: 'Signaux de demande présents',
+        isPositive: true,
+      });
     }
   } else {
-    reasons.push('Données économiques partielles');
+    reasons.push({
+      code: 'CONF_DATA_PARTIAL',
+      label: 'Données économiques partielles',
+      isPositive: false,
+    });
     issues += 1;
   }
 
+  // Extract codes for logging
+  const codes = reasons.map(r => r.code);
+
   // Determine level
   if (issues === 0) {
-    return { level: 'eclaire', reasons: reasons.filter(r => !r.includes('non')) };
+    return { level: 'eclaire', reasons, codes };
   } else if (issues <= 2) {
-    return {
-      level: 'incomplet',
-      reasons: reasons.filter(r => r.includes('non') || r.includes('partiel') || r.includes('estimé'))
-    };
+    return { level: 'incomplet', reasons, codes };
   } else {
-    return {
-      level: 'fragile',
-      reasons: reasons.filter(r => r.includes('non') || r.includes('partiel') || r.includes('estimé'))
-    };
+    return { level: 'fragile', reasons, codes };
   }
+}
+
+/**
+ * Legacy wrapper for backward compatibility
+ */
+export function calculateConfidenceLevelLegacy(
+  reviewProfile: ReviewProfile | null,
+  hasSpecBundle: boolean,
+  componentScores: Record<string, any> | undefined,
+  finalScore: number,
+): { level: ConfidenceLevel; reasons: string[] } {
+  const result = calculateConfidenceLevel(reviewProfile, hasSpecBundle, componentScores, finalScore);
+  return {
+    level: result.level,
+    reasons: result.reasons.filter(r => !r.isPositive).map(r => r.label),
+  };
 }

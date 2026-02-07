@@ -11,7 +11,7 @@ de les infantiliser, mais de rendre le risque conscient et traçable."
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 
 from . import db
@@ -291,6 +291,71 @@ async def record_outcome(override_id: str, outcome: RiskOverrideOutcome):
     except Exception as e:
         conn.rollback()
         logger.error(f"Error recording outcome: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        pool.putconn(conn)
+
+
+@router.get("/pending-postmortems")
+async def get_pending_postmortems(
+    user_id: str = Query("default"),
+    days_threshold: int = Query(14, ge=7, le=30, description="Days since override to trigger reminder"),
+):
+    """
+    Get risk overrides awaiting post-mortem feedback.
+
+    V3.2: Post-mortem loop system.
+    Returns overrides that:
+    - Have no outcome recorded yet
+    - Are older than `days_threshold` days (default: 14)
+
+    Philosophy: Learning from decisions requires reflection.
+    After 14 days, we ask: "Comment ça s'est passé?"
+    """
+    pool = db.get_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    conn = pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cutoff_date = datetime.utcnow() - timedelta(days=days_threshold)
+
+            cur.execute("""
+                SELECT ro.id, ro.asin, ro.confidence_level, ro.hypothesis,
+                       ro.hypothesis_reason, ro.missing_info, ro.created_at,
+                       a.title, a.brand
+                FROM risk_overrides ro
+                LEFT JOIN asins a ON ro.asin = a.asin
+                WHERE ro.user_id = %s
+                  AND ro.outcome IS NULL
+                  AND ro.created_at <= %s
+                ORDER BY ro.created_at ASC
+            """, (user_id, cutoff_date))
+            rows = cur.fetchall()
+
+            return {
+                "pending_count": len(rows),
+                "days_threshold": days_threshold,
+                "overrides": [
+                    {
+                        "id": str(row[0]),
+                        "asin": row[1],
+                        "confidence_level": row[2],
+                        "hypothesis": row[3],
+                        "hypothesis_reason": row[4],
+                        "missing_info": row[5] or [],
+                        "created_at": row[6].isoformat() if row[6] else None,
+                        "days_ago": (datetime.utcnow() - row[6]).days if row[6] else None,
+                        "product_title": row[7],
+                        "product_brand": row[8],
+                    }
+                    for row in rows
+                ],
+                "message": f"{len(rows)} décision(s) en attente de retour d'expérience" if rows else "Aucun post-mortem en attente",
+            }
+    except Exception as e:
+        logger.error(f"Error fetching pending postmortems: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         pool.putconn(conn)

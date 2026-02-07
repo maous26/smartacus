@@ -615,6 +615,99 @@ export const api = {
     };
   },
 
+  /**
+   * Backfill reviews for an ASIN (V3.3)
+   *
+   * Fetches reviews from Amazon via Outscraper (default) or Oxylabs,
+   * saves to DB, and runs Review Intelligence analysis.
+   */
+  async backfillReviews(
+    asin: string,
+    options?: { domain?: string; force?: boolean; source?: 'outscraper' | 'oxylabs' }
+  ): Promise<{
+    status: 'success' | 'pending' | 'skipped' | 'error';
+    reviewsFetched: number;
+    reviewsInserted: number;
+    reviewsUpdated: number;
+    analysisTriggered: boolean;
+    message: string;
+    profile: ReviewProfile | null;
+  }> {
+    const response = await fetchApi<{
+      asin: string;
+      status: string;
+      reviews_fetched: number;
+      reviews_inserted: number;
+      reviews_updated: number;
+      analysis_triggered: boolean;
+      message: string;
+      profile: {
+        asin: string;
+        improvement_score: number;
+        dominant_pain: string | null;
+        reviews_analyzed: number;
+        negative_reviews_analyzed: number;
+        reviews_ready: boolean;
+        has_actionable_insights: boolean;
+        thesis_fragment: string;
+        top_defects: Array<{
+          defect_type: string;
+          frequency: number;
+          severity_score: number;
+          frequency_rate: number;
+          example_quotes: string[];
+        }>;
+        missing_features: Array<{
+          feature: string;
+          mentions: number;
+          confidence: number;
+          wish_strength: number;
+          source_quotes: string[];
+        }>;
+      } | null;
+    }>(`/api/reviews/${asin}/backfill`, {
+      method: 'POST',
+      body: JSON.stringify({
+        domain: options?.domain || 'fr',
+        force: options?.force || false,
+        source: options?.source || 'outscraper',
+      }),
+    });
+
+    return {
+      status: response.status as 'success' | 'pending' | 'skipped' | 'error',
+      reviewsFetched: response.reviews_fetched,
+      reviewsInserted: response.reviews_inserted,
+      reviewsUpdated: response.reviews_updated,
+      analysisTriggered: response.analysis_triggered,
+      message: response.message,
+      profile: response.profile ? {
+        asin: response.profile.asin,
+        improvementScore: response.profile.improvement_score,
+        dominantPain: response.profile.dominant_pain,
+        reviewsAnalyzed: response.profile.reviews_analyzed,
+        negativeReviewsAnalyzed: response.profile.negative_reviews_analyzed,
+        reviewsReady: response.profile.reviews_ready,
+        hasActionableInsights: response.profile.has_actionable_insights,
+        thesisFragment: response.profile.thesis_fragment,
+        topDefects: response.profile.top_defects.map((d) => ({
+          defectType: d.defect_type,
+          frequency: d.frequency,
+          severityScore: d.severity_score,
+          frequencyRate: d.frequency_rate,
+          exampleQuotes: d.example_quotes,
+        })),
+        missingFeatures: response.profile.missing_features.map((f) => ({
+          feature: f.feature,
+          mentions: f.mentions,
+          confidence: f.confidence,
+          wishStrength: f.wish_strength,
+          sourceQuotes: f.source_quotes,
+        })),
+      } : null,
+    };
+  },
+
   // ===========================================================================
   // RISK JOURNAL ENDPOINTS
   // ===========================================================================
@@ -628,6 +721,7 @@ export const api = {
     hypothesis: string;
     hypothesisReason: string;
     missingInfo: string[];
+    reasonCodes?: string[];  // V3.2: Include codes for analytics
     runId?: string;
     userId?: string;
   }): Promise<{ id: string; message: string }> {
@@ -639,6 +733,7 @@ export const api = {
         hypothesis: data.hypothesis,
         hypothesis_reason: data.hypothesisReason,
         missing_info: data.missingInfo,
+        reason_codes: data.reasonCodes,  // V3.2
         run_id: data.runId,
         user_id: data.userId || 'default',
       }),
@@ -687,6 +782,87 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify({ outcome, notes }),
     });
+  },
+
+  /**
+   * Get pending post-mortems (V3.2)
+   * Returns risk overrides awaiting feedback (older than 14 days, no outcome)
+   */
+  async getPendingPostMortems(params?: {
+    daysThreshold?: number;
+    userId?: string;
+  }): Promise<{
+    pendingCount: number;
+    daysThreshold: number;
+    overrides: Array<{
+      id: string;
+      asin: string;
+      confidence_level: string;
+      hypothesis: string;
+      hypothesis_reason: string;
+      missing_info: string[];
+      created_at: string;
+      days_ago: number;
+      product_title: string | null;
+      product_brand: string | null;
+    }>;
+    message: string;
+  }> {
+    const searchParams = new URLSearchParams();
+    if (params?.daysThreshold) searchParams.set('days_threshold', params.daysThreshold.toString());
+    if (params?.userId) searchParams.set('user_id', params.userId);
+
+    const query = searchParams.toString();
+    const endpoint = `/api/risk/pending-postmortems${query ? `?${query}` : ''}`;
+
+    return fetchApi(endpoint);
+  },
+
+  /**
+   * Record outcome for a risk override (alias for PostMortemReminder)
+   */
+  async recordOverrideOutcome(
+    overrideId: string,
+    data: {
+      outcome: 'success' | 'partial' | 'failure' | 'abandoned';
+      notes?: string;
+    },
+  ): Promise<{ message: string }> {
+    return fetchApi<{ message: string }>(`/api/risk/overrides/${overrideId}/outcome`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    });
+  },
+
+  /**
+   * Get risk journal statistics
+   */
+  async getRiskStats(userId?: string): Promise<{
+    totalOverrides: number;
+    outcomesRecorded: number;
+    byConfidenceLevel: Record<string, number>;
+    byOutcome: Record<string, number>;
+    byHypothesisReason: Record<string, number>;
+    successRate: number | null;
+  }> {
+    const endpoint = userId ? `/api/risk/stats?user_id=${userId}` : '/api/risk/stats';
+    const response = await fetchApi<{
+      total_overrides: number;
+      outcomes_recorded: number;
+      by_confidence_level: Record<string, number>;
+      by_outcome: Record<string, number>;
+      by_hypothesis_reason: Record<string, number>;
+      success_rate: number | null;
+    }>(endpoint);
+
+    return {
+      totalOverrides: response.total_overrides,
+      outcomesRecorded: response.outcomes_recorded,
+      byConfidenceLevel: response.by_confidence_level,
+      byOutcome: response.by_outcome,
+      byHypothesisReason: response.by_hypothesis_reason,
+      successRate: response.success_rate,
+    };
   },
 };
 
