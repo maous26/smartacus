@@ -422,6 +422,9 @@ export function OpportunityDetail({ opportunity, onClose, onStartSourcing, isDem
           className="mb-6"
         />
 
+        {/* Review Intelligence Panel — V3.9: moved up for visibility */}
+        <ReviewInsightPanel asin={asin} isDemo={isDemo} />
+
         {/* What we know vs don't know */}
         <div className="grid grid-cols-2 gap-4 mb-6">
           <div className="bg-emerald-50 rounded-xl p-4 border border-emerald-200">
@@ -531,9 +534,6 @@ export function OpportunityDetail({ opportunity, onClose, onStartSourcing, isDem
             Il vient de votre capacité à agir là où les autres ne regardent pas.
           </p>
         </div>
-
-        {/* Review Intelligence Panel */}
-        <ReviewInsightPanel asin={asin} isDemo={isDemo} />
 
         {/* Product Spec Panel */}
         <ProductSpecPanel asin={asin} isDemo={isDemo} />

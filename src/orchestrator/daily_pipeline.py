@@ -780,11 +780,8 @@ class DailyPipeline:
                     "review_gap_vs_top10": 0.50,  # Default estimate
                     "has_amazon_basics": False,
                     "has_brand_dominance": False,
-                    # Gap inputs (defaults - would need review analysis)
-                    "negative_review_percent": 0.10,
-                    "wish_mentions_per_100": 3,
-                    "unanswered_questions": 5,
-                    "has_recurring_problems": False,
+                    # Gap inputs — read real data from review_improvement_profiles
+                    **self._load_review_gap_inputs(asin, conn),
                     # Time pressure inputs
                     "stockout_count_90d": self._count_stockouts(asin, conn),
                     "price_trend_30d": price_trend_30d,
@@ -793,6 +790,63 @@ class DailyPipeline:
                 }
 
                 return product_data
+
+    def _load_review_gap_inputs(self, asin: str, conn) -> dict:
+        """Load real review data from review_improvement_profiles for gap scoring.
+
+        Returns a dict with keys expected by score_gap():
+        - negative_review_percent
+        - wish_mentions_per_100
+        - unanswered_questions
+        - has_recurring_problems
+        """
+        defaults = {
+            "negative_review_percent": 0.10,
+            "wish_mentions_per_100": 3,
+            "unanswered_questions": 5,
+            "has_recurring_problems": False,
+        }
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT improvement_score, dominant_pain,
+                           reviews_analyzed, negative_reviews_analyzed,
+                           top_defects, missing_features
+                    FROM review_improvement_profiles
+                    WHERE asin = %s
+                    ORDER BY computed_at DESC
+                    LIMIT 1
+                """, (asin,))
+                row = cur.fetchone()
+                if not row:
+                    return defaults
+
+                reviews_analyzed = row[2] or 0
+                negative_analyzed = row[3] or 0
+                top_defects = row[4] or []
+                missing_features = row[5] or []
+                improvement_score = row[0] or 0.0
+                dominant_pain = row[1]
+
+                # Compute real negative_review_percent
+                neg_pct = (negative_analyzed / reviews_analyzed) if reviews_analyzed > 0 else 0.10
+
+                # Count wish mentions (normalize per 100 reviews)
+                total_wish_mentions = sum(f.get("mentions", 0) for f in missing_features) if missing_features else 0
+                wish_per_100 = (total_wish_mentions / reviews_analyzed * 100) if reviews_analyzed > 0 else 3
+
+                # has_recurring_problems = dominant pain exists with meaningful score
+                has_recurring = bool(dominant_pain and improvement_score > 0.2)
+
+                return {
+                    "negative_review_percent": round(neg_pct, 3),
+                    "wish_mentions_per_100": round(wish_per_100, 1),
+                    "unanswered_questions": 5,  # No Q&A data yet
+                    "has_recurring_problems": has_recurring,
+                }
+        except Exception as e:
+            logger.warning(f"Failed to load review gap inputs for {asin}: {e}")
+            return defaults
 
     def _estimate_alibaba_price(self, amazon_price: float) -> float:
         """Estimate Alibaba sourcing price (rough heuristic)."""

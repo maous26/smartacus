@@ -191,8 +191,39 @@ async def generate_thesis(request: ThesisRequest):
 
         generator = ThesisGenerator()
 
+        # Enrich opportunity_data with review_profile from DB
+        enriched_data = dict(request.opportunity_data)
+        if "review_profile" not in enriched_data:
+            asin = enriched_data.get("asin", "")
+            if asin:
+                try:
+                    from .shared import load_profile
+                    from .db import get_connection
+                    with get_connection() as conn:
+                        profile = load_profile(conn, asin)
+                        if profile:
+                            enriched_data["review_profile"] = {
+                                "improvement_score": profile.improvement_score,
+                                "dominant_pain": profile.dominant_pain,
+                                "reviews_analyzed": profile.reviews_analyzed,
+                                "negative_reviews_analyzed": profile.negative_reviews_analyzed,
+                                "top_defects": [
+                                    {"defect_type": d.defect_type, "frequency": d.frequency,
+                                     "frequency_rate": d.frequency / max(profile.negative_reviews_analyzed, 1),
+                                     "severity_score": d.severity_score}
+                                    for d in profile.top_defects
+                                ],
+                                "missing_features": [
+                                    {"feature": f.feature, "mentions": f.mentions}
+                                    for f in profile.missing_features
+                                ],
+                                "thesis_fragment": profile.to_thesis_fragment() if hasattr(profile, 'to_thesis_fragment') else "",
+                            }
+                except Exception:
+                    pass  # Non-blocking: thesis works without review data
+
         thesis = await generator.generate_thesis(
-            opportunity_data=request.opportunity_data,
+            opportunity_data=enriched_data,
             score_data=request.score_data,
             events=request.events,
         )

@@ -134,6 +134,10 @@ THESIS_PROMPT_TEMPLATE = """Analyse cette opportunité Amazon et génère une th
 
 {economic_events}
 
+## Intelligence Reviews
+
+{review_intelligence}
+
 ## Estimations Préliminaires
 
 - Prix d'achat estimé (Alibaba): ${alibaba_price}
@@ -198,6 +202,44 @@ class ThesisGenerator:
                 lines.append(f"  Valeur: {sig['value']}")
         return "\n".join(lines)
 
+    def _format_review_intelligence(self, opportunity_data: Dict[str, Any]) -> str:
+        """Formate les données review intelligence pour le prompt."""
+        profile = opportunity_data.get("review_profile")
+        if not profile:
+            return "Pas de données d'analyse reviews disponibles."
+
+        lines = []
+        score = profile.get("improvement_score", 0)
+        analyzed = profile.get("reviews_analyzed", 0)
+        neg = profile.get("negative_reviews_analyzed", 0)
+        dominant = profile.get("dominant_pain")
+
+        lines.append(f"- Avis analysés: {analyzed} ({neg} négatifs)")
+        lines.append(f"- Score d'amélioration produit: {score:.0%}")
+        if dominant:
+            lines.append(f"- Douleur dominante: **{dominant}**")
+
+        defects = profile.get("top_defects", [])
+        if defects:
+            lines.append("- Défauts récurrents:")
+            for d in defects[:3]:
+                dtype = d.get("defect_type", "unknown")
+                freq = d.get("frequency", 0)
+                rate = d.get("frequency_rate", 0)
+                lines.append(f"  - {dtype}: {freq}x ({rate:.0%} des négatifs)")
+
+        wishes = profile.get("missing_features", [])
+        if wishes:
+            lines.append("- Features demandées:")
+            for w in wishes[:3]:
+                lines.append(f"  - \"{w.get('feature', '')}\" ({w.get('mentions', 0)} mentions)")
+
+        fragment = profile.get("thesis_fragment")
+        if fragment:
+            lines.append(f"- Résumé: {fragment}")
+
+        return "\n".join(lines)
+
     def _format_events(self, events: List[Dict[str, Any]]) -> str:
         """Formate les événements économiques pour le prompt."""
         if not events:
@@ -248,6 +290,7 @@ class ThesisGenerator:
             window_days=score_data.get("window_days", 90),
             urgency_level=score_data.get("urgency_level", "standard"),
             economic_events=self._format_events(events or []),
+            review_intelligence=self._format_review_intelligence(opportunity_data),
             alibaba_price=opportunity_data.get("alibaba_price", opportunity_data.get("amazon_price", 0) / 5),
             gross_margin=score_data.get("gross_margin_percent", 30),
             monthly_units=score_data.get("estimated_monthly_units", 100),
