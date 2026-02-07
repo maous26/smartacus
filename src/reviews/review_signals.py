@@ -33,71 +33,124 @@ logger = logging.getLogger(__name__)
 DEFECT_LEXICON: Dict[str, Tuple[List[str], float]] = {
     "mechanical_failure": (
         [
+            # English
             "broke", "broken", "snapped", "cracked", "fell apart",
             "stopped working", "collapsed", "shattered", "split",
+            # French
+            "cassé", "cassée", "brisé", "brisée", "fissuré", "fissure",
+            "tombé en panne", "ne fonctionne plus", "pété", "explosé",
+            "se casse", "s'est cassé", "a lâché", "a craqué",
         ],
         0.9,  # high severity — product failure
     ),
     "poor_grip": (
         [
+            # English
             "slips", "slides", "falls off", "doesn't hold", "loose",
             "phone fell", "dropped my phone", "can't hold", "keeps falling",
             "doesn't stay", "won't grip", "no grip",
+            # French
+            "glisse", "tombe", "ne tient pas", "lâche", "se décroche",
+            "téléphone est tombé", "téléphone tombe", "ne maintient pas",
+            "tient pas", "pas stable", "instable", "bouge tout le temps",
+            "se détache", "ne reste pas", "ça tombe",
         ],
         0.85,  # high — core function failure
     ),
     "installation_issue": (
         [
+            # English
             "hard to install", "difficult to mount", "instructions",
             "confusing setup", "can't attach", "won't stick",
             "doesn't stick", "suction doesn't hold", "suction cup failed",
             "won't stay on windshield", "won't stay on dash",
+            # French
+            "difficile à installer", "dur à monter", "compliqué",
+            "notice incompréhensible", "pas intuitif", "mal conçu",
+            "ne colle pas", "ventouse ne tient pas", "ventouse lâche",
+            "ne s'accroche pas", "ne se fixe pas", "galère",
+            "prise de tête", "difficile à fixer", "pas pratique à installer",
         ],
         0.6,  # medium — usability issue
     ),
     "compatibility_issue": (
         [
+            # English
             "doesn't fit", "too small", "too big", "case too thick",
             "won't fit my phone", "not compatible", "blocks camera",
             "blocks buttons", "can't charge", "magsafe doesn't work",
             "doesn't work with case", "phone too heavy",
+            # French
+            "ne rentre pas", "trop petit", "trop grand", "coque trop épaisse",
+            "pas compatible", "incompatible", "bloque la caméra",
+            "bloque les boutons", "empêche de charger", "magsafe ne marche pas",
+            "ne convient pas", "pas adapté", "ne va pas avec",
+            "trop lourd", "téléphone trop gros", "taille pas adaptée",
         ],
         0.7,  # medium-high — purchase regret
     ),
     "material_quality": (
         [
+            # English
             "cheap plastic", "feels flimsy", "low quality", "thin",
             "feels cheap", "poor quality", "plastic broke",
             "rubber peeled", "paint chipped", "creaks",
+            # French
+            "plastique cheap", "plastique bas de gamme", "fait pas solide",
+            "mauvaise qualité", "qualité médiocre", "fragile",
+            "fait cheap", "fait toc", "camelote", "pacotille",
+            "caoutchouc décollé", "peinture s'écaille", "craque",
+            "pas robuste", "bas de gamme", "bof", "nul",
         ],
         0.5,  # medium — perception issue
     ),
     "vibration_noise": (
         [
+            # English
             "vibrates", "rattles", "shakes", "buzzes", "noisy",
             "wobbles", "jiggles", "unstable on bumps",
+            # French
+            "vibre", "tremble", "secoue", "bruit", "bruyant",
+            "cliquetis", "claque", "ballotte", "branlant",
+            "bouge sur les bosses", "instable sur la route", "grince",
         ],
         0.55,  # medium — daily annoyance
     ),
     "heat_issue": (
         [
+            # English
             "overheats", "gets hot", "phone heats up", "too hot",
             "blocks airflow", "heat damage",
+            # French
+            "surchauffe", "chauffe", "téléphone chauffe", "trop chaud",
+            "bloque la ventilation", "empêche la circulation d'air",
+            "devient brûlant", "chaleur",
         ],
         0.65,  # medium-high — safety concern
     ),
     "size_fit": (
         [
+            # English
             "too bulky", "blocks view", "obstructs", "takes too much space",
             "too large", "sticks out", "in the way",
+            # French
+            "trop encombrant", "gêne la vue", "bloque la vue", "encombrant",
+            "prend trop de place", "trop gros", "dépasse", "gênant",
+            "obstrue", "visibilité réduite",
         ],
         0.4,  # lower — preference issue
     ),
     "durability": (
         [
+            # English
             "after a month", "after a week", "few months later",
             "didn't last", "wore out", "degraded", "stopped sticking",
             "adhesive wore off", "suction lost over time",
+            # French
+            "au bout d'un mois", "au bout d'une semaine", "quelques mois après",
+            "n'a pas tenu", "n'a pas duré", "usé", "dégradé",
+            "ne colle plus", "adhésif ne tient plus", "ventouse ne tient plus",
+            "a duré", "trop vite usé", "pas durable", "courte durée",
         ],
         0.75,  # high — longevity failure
     ),
@@ -108,12 +161,21 @@ DEFECT_LEXICON: Dict[str, Tuple[List[str], float]] = {
 # =============================================================================
 
 WISH_PATTERNS = [
+    # English patterns
     re.compile(r"i (?:\w+ )?wish (?:it )?(?:had|was|were|could|would)(.*?)(?:\.|!|$)", re.IGNORECASE),
     re.compile(r"would be (?:nice|great|better|awesome) if(.*?)(?:\.|!|$)", re.IGNORECASE),
     re.compile(r"should (?:have|come with|include)(.*?)(?:\.|!|$)", re.IGNORECASE),
     re.compile(r"needs? (?:a |an |to have )(.*?)(?:\.|!|$)", re.IGNORECASE),
     re.compile(r"(?:missing|lacks?) (?:a |an )?(.*?)(?:\.|!|$)", re.IGNORECASE),
     re.compile(r"if only (?:it )?(.*?)(?:\.|!|$)", re.IGNORECASE),
+    # French patterns
+    re.compile(r"j'aurais (?:aimé|voulu|souhaité|préféré)(.*?)(?:\.|!|$)", re.IGNORECASE),
+    re.compile(r"(?:il |ce |ça )(?:faudrait|manque|aurait fallu)(.*?)(?:\.|!|$)", re.IGNORECASE),
+    re.compile(r"(?:dommage qu|ommage qu)[e']?(.*?)(?:\.|!|$)", re.IGNORECASE),
+    re.compile(r"(?:il|ce) serait (?:bien|mieux|top|génial|super) (?:d'|de |qu[e']?)(.*?)(?:\.|!|$)", re.IGNORECASE),
+    re.compile(r"devrait (?:avoir|inclure|proposer|être)(.*?)(?:\.|!|$)", re.IGNORECASE),
+    re.compile(r"(?:il )?manque(?: un| une| le| la| des| de)?(.*?)(?:\.|!|$)", re.IGNORECASE),
+    re.compile(r"(?:si seulement|si au moins)(.*?)(?:\.|!|$)", re.IGNORECASE),
 ]
 
 
@@ -134,15 +196,34 @@ _ENGLISH_STOPWORDS = {
     "came", "come", "came", "built", "one", "like",
 }
 
-# Niche-specific stopwords for Car Phone Mounts.
+# Niche-specific stopwords for Car Phone Mounts (EN + FR).
 # These words appear in almost every wish and create artificial overlaps
 # during fuzzy grouping (e.g. "phone mount wireless" vs "phone mount clip").
 _NICHE_STOPWORDS = {
+    # English
     "phone", "mount", "car", "holder", "dashboard", "windshield",
     "stand", "cradle", "bracket", "device",
+    # French
+    "téléphone", "support", "voiture", "tableau", "bord",
+    "pare-brise", "portable", "smartphone", "véhicule",
 }
 
-WISH_STOPWORDS = frozenset(_ENGLISH_STOPWORDS | _NICHE_STOPWORDS)
+# French stopwords for wish normalisation
+_FRENCH_STOPWORDS = {
+    "le", "la", "les", "un", "une", "des", "du", "de", "d",
+    "je", "tu", "il", "elle", "nous", "vous", "ils", "elles",
+    "ce", "cette", "ces", "mon", "ma", "mes", "ton", "ta", "tes",
+    "son", "sa", "ses", "notre", "votre", "leur", "leurs",
+    "qui", "que", "quoi", "dont", "où",
+    "et", "ou", "mais", "donc", "car", "ni", "si",
+    "ne", "pas", "plus", "moins", "très", "trop", "assez",
+    "dans", "sur", "sous", "avec", "sans", "pour", "par",
+    "en", "au", "aux", "chez",
+    "est", "sont", "était", "été", "être", "avoir", "fait",
+    "ça", "cela", "ceci",
+}
+
+WISH_STOPWORDS = frozenset(_ENGLISH_STOPWORDS | _NICHE_STOPWORDS | _FRENCH_STOPWORDS)
 
 # Minimum similarity ratio (0–1) to merge two wish keys into one group.
 WISH_SIMILARITY_THRESHOLD = 0.6
@@ -163,7 +244,7 @@ def normalize_wish_key(text: str) -> str:
     4. Collapse whitespace
     """
     text = text.lower().strip()
-    text = re.sub(r"[^a-z0-9\s]", "", text)
+    text = re.sub(r"[^a-zà-ÿ0-9\s]", "", text)  # keep accented chars
     words = [w for w in text.split() if w not in WISH_STOPWORDS and len(w) > 1]
     return " ".join(words)
 
