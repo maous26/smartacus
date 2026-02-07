@@ -245,7 +245,7 @@ export default function Home() {
             </div>
 
             {/* Detail panel */}
-            <div className="lg:sticky lg:top-24 lg:self-start">
+            <div className="lg:sticky lg:top-24 lg:self-start lg:max-h-[calc(100vh-7rem)] lg:overflow-y-auto">
               {selectedOpportunity ? (
                 <div className="space-y-4">
                   <OpportunityDetail
