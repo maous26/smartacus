@@ -410,14 +410,21 @@ class StrategyAgent:
     DENSITY_GOOD = 0.05        # 5% = good conversion
     DENSITY_BAD = 0.01         # 1% = poor conversion
 
-    # Freshness
+    # Value guard: minimum value_per_1k_tokens to justify a full scan
+    # Below this, reduce ASIN allocation to save tokens
+    MIN_VALUE_PER_1K = 5.0     # Minimum 5 EUR/1k tokens to get full allocation
+    LOW_VALUE_ASIN_CAP = 25    # Cap ASINs for low-value niches (instead of full allocation)
+
+    # Freshness & Rotation
     STALE_DAYS = 14            # Niche not scanned in 14 days needs refresh
+    RECENTLY_SCANNED_DAYS = 2  # Niche scanned < 2 days ago gets rotation penalty
+    ROTATION_PENALTY = 0.4     # Score multiplier for recently scanned niches (encourages rotation)
 
     # Cold start protection
     MIN_RUNS_BEFORE_PAUSE = 2  # Don't pause before 2 runs
     COLD_START_TOKENS = 200    # Fixed allocation for new niches
 
-    # Event boost
+    # Event boost (can override rotation penalty)
     EVENT_BOOST_MULTIPLIER = 1.5  # Boost score if critical events
 
     def __init__(self, enable_llm: bool = False, llm_config: Optional[LLMConfig] = None):
@@ -552,13 +559,18 @@ class StrategyAgent:
 
     def _score_niche(self, niche: NicheMetrics) -> float:
         """
-        Compute composite score for a niche.
+        Compute composite score for a niche with rotation awareness.
 
         Score components (weights sum to 1.0):
         - value_per_token: 40% — economic efficiency
         - density: 30% — opportunity conversion rate
-        - freshness: 20% — staleness penalty/bonus
+        - freshness: 20% — staleness penalty/bonus (granular curve)
         - event_boost: 10% — recent critical events
+
+        Rotation logic:
+        - Niches scanned < RECENTLY_SCANNED_DAYS ago get a penalty
+          (ROTATION_PENALTY multiplier) UNLESS they have critical events.
+        - This ensures categories naturally rotate day-to-day.
 
         Returns:
             Score between 0 and 1
@@ -569,13 +581,18 @@ class StrategyAgent:
         # Density (5% or higher is excellent)
         density_score = min(1.0, niche.density / self.DENSITY_GOOD)
 
-        # Freshness (bonus for stale, penalty for very recent)
-        if niche.days_since_scan >= self.STALE_DAYS:
-            freshness_score = 0.8  # Needs refresh
-        elif niche.days_since_scan >= 7:
-            freshness_score = 0.5  # Normal
+        # Freshness — granular curve instead of 3 buckets
+        days = niche.days_since_scan
+        if days >= self.STALE_DAYS:
+            freshness_score = 1.0   # Urgent refresh needed
+        elif days >= 7:
+            # Linear interpolation 7d→14d: 0.5→1.0
+            freshness_score = 0.5 + 0.5 * ((days - 7) / (self.STALE_DAYS - 7))
+        elif days >= self.RECENTLY_SCANNED_DAYS:
+            # Linear interpolation 2d→7d: 0.2→0.5
+            freshness_score = 0.2 + 0.3 * ((days - self.RECENTLY_SCANNED_DAYS) / (7 - self.RECENTLY_SCANNED_DAYS))
         else:
-            freshness_score = 0.3  # Recently scanned, lower priority
+            freshness_score = 0.1   # Just scanned, lowest priority
 
         # Event boost
         if niche.recent_critical_events > 0:
@@ -602,7 +619,16 @@ class StrategyAgent:
         # Apply cold start bonus (additive, capped at 1.0)
         final_score = min(1.0, base_score + cold_start_bonus)
 
-        # Apply event boost multiplier if critical events
+        # Rotation penalty: recently scanned niches get deprioritized
+        # UNLESS they have critical events (events override rotation)
+        if days < self.RECENTLY_SCANNED_DAYS and niche.recent_critical_events == 0:
+            final_score *= self.ROTATION_PENALTY
+            logger.debug(
+                f"Rotation penalty for {niche.name}: scanned {days}d ago, "
+                f"score {final_score/self.ROTATION_PENALTY:.3f} → {final_score:.3f}"
+            )
+
+        # Apply event boost multiplier if critical events (overrides rotation)
         if niche.recent_critical_events > 0:
             final_score = min(1.0, final_score * self.EVENT_BOOST_MULTIPLIER)
 
@@ -650,7 +676,7 @@ class StrategyAgent:
                 ))
             return assessments
 
-        # Proportional allocation
+        # Proportional allocation with value guard
         for niche, score in niches:
             proportion = score / total_score
             tokens = int(budget * proportion)
@@ -664,6 +690,20 @@ class StrategyAgent:
 
             max_asins = self._tokens_to_asins(tokens)
 
+            # VALUE GUARD: Reduce allocation for low-value niches
+            # (only applies to mature niches with enough data to judge)
+            value_guard_applied = False
+            if (niche.total_runs >= self.MIN_RUNS_BEFORE_PAUSE
+                    and niche.value_per_1k_tokens < self.MIN_VALUE_PER_1K
+                    and niche.value_per_1k_tokens > 0):
+                max_asins = min(max_asins, self.LOW_VALUE_ASIN_CAP)
+                tokens = min(tokens, self._asins_to_tokens(max_asins))
+                value_guard_applied = True
+
+            justification = self._justify(niche, score, status)
+            if value_guard_applied:
+                justification += f"; VALUE GUARD: capped to {max_asins} ASINs (value {niche.value_per_1k_tokens:.1f} EUR/1k < {self.MIN_VALUE_PER_1K})"
+
             assessments.append(NicheAssessment(
                 niche_id=niche.niche_id,
                 name=niche.name,
@@ -672,7 +712,7 @@ class StrategyAgent:
                 score=score,
                 tokens_allocated=tokens,
                 max_asins=max_asins,
-                justification=self._justify(niche, score, status),
+                justification=justification,
                 confidence=1.0,
             ))
 
@@ -687,6 +727,10 @@ class StrategyAgent:
         if tokens < 10:
             return 0
         return max(1, (tokens - 5) // 2)
+
+    def _asins_to_tokens(self, asins: int) -> int:
+        """Convert ASIN count to estimated token cost."""
+        return 5 + (asins * 2)
 
     def _justify(self, niche: NicheMetrics, score: float, status: NicheStatus) -> str:
         """Generate human-readable justification."""

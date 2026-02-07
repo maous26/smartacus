@@ -164,6 +164,7 @@ class OxylabsClient:
         domain: str,
     ) -> List[Review]:
         """Parse reviews from Oxylabs response."""
+        import json as json_module
         reviews = []
 
         try:
@@ -172,7 +173,29 @@ class OxylabsClient:
                 logger.warning(f"No results in Oxylabs response for {asin}")
                 return []
 
-            content = results[0].get("content", {})
+            result = results[0]
+            status_code = result.get("status_code", 0)
+
+            # Check for HTTP errors
+            if status_code == 404:
+                logger.warning(f"Product not found on Amazon: {asin}")
+                return []
+            if status_code != 200:
+                logger.warning(f"Oxylabs returned status {status_code} for {asin}")
+                return []
+
+            content = result.get("content", {})
+
+            # Content may be a JSON string - parse it if so
+            if isinstance(content, str):
+                if not content:
+                    logger.warning(f"Empty content from Oxylabs for {asin}")
+                    return []
+                try:
+                    content = json_module.loads(content)
+                except json_module.JSONDecodeError:
+                    logger.warning(f"Failed to parse content as JSON for {asin}")
+                    return []
 
             # Reviews are in 'reviews' key
             raw_reviews = content.get("reviews", [])

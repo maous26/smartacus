@@ -97,7 +97,7 @@ export function ProductSpecPanel({ asin, isDemo = false }: ProductSpecPanelProps
   ];
 
   return (
-    <div className="mb-6">
+    <div className="mb-6" data-panel="spec">
       <h3 className="text-sm uppercase tracking-wide text-gray-500 mb-3">
         Spec Produit OEM
         <span className="text-xs font-normal text-gray-400 ml-2">

@@ -442,6 +442,10 @@ def run_controlled(
 
     try:
         # --- Step 1: Discover ASINs ---
+        # Cap discovery pool to prevent runaway Keepa token consumption
+        # Uses INGESTION_TARGET_ASIN_COUNT from config (default 10,000)
+        discovery_pool_max = settings.ingestion.target_asin_count
+
         with audit.time_phase("discovery"):
             if explicit_asins:
                 target_asins = explicit_asins
@@ -451,7 +455,12 @@ def run_controlled(
                 print(f"  Using {len(target_asins)} tracked ASINs from DB")
             else:
                 target_asins = pipeline.discover_category_asins()
-                print(f"  Discovered {len(target_asins)} ASINs in category")
+                raw_count = len(target_asins)
+                if raw_count > discovery_pool_max:
+                    target_asins = target_asins[:discovery_pool_max]
+                    print(f"  Discovered {raw_count} ASINs, capped to {discovery_pool_max} (INGESTION_TARGET_ASIN_COUNT)")
+                else:
+                    print(f"  Discovered {len(target_asins)} ASINs in category")
 
             audit.record_count("asins_discovered", len(target_asins))
 
@@ -661,7 +670,11 @@ def run_controlled(
             except Exception as e:
                 audit.warn(f"Failed to save artifacts: {e}")
 
-        # --- Step 6c: Review Intelligence (deterministic, skip if no reviews) ---
+        # --- Step 6c: Review Intelligence + Tag review_needed ---
+        # Strategy: Pipeline does NOT block on review scraping.
+        # 1. Analyze reviews already in DB (fast, deterministic)
+        # 2. Tag ASINs with score >= 40 that lack reviews as review_needed
+        #    → Review backfill happens asynchronously (separate cron/endpoint)
         with audit.time_phase("review_intelligence"):
             try:
                 from src.reviews import ReviewSignalExtractor, ReviewInsightAggregator
@@ -671,8 +684,9 @@ def run_controlled(
                 pool = db.get_pool()
                 conn = pool.getconn()
                 try:
-                    # Check if reviews table has data for scored ASINs
                     scored_asins = [opp["asin"] for opp in scored if opp.get("is_valid", True)]
+
+                    # 1. Analyze reviews already in DB
                     with conn.cursor() as cur:
                         cur.execute(
                             "SELECT COUNT(*) FROM reviews WHERE asin = ANY(%s)",
@@ -680,11 +694,8 @@ def run_controlled(
                         )
                         review_count = cur.fetchone()[0]
 
-                    if review_count == 0:
-                        print(f"  Review Intelligence: SKIP (0 reviews in DB for {len(scored_asins)} ASINs)")
-                        audit.record_count("reviews_analyzed", 0)
-                    else:
-                        analyzed = 0
+                    analyzed = 0
+                    if review_count > 0:
                         for asin in scored_asins:
                             reviews_data = aggregator.load_reviews_from_db(conn, asin)
                             if not reviews_data:
@@ -706,9 +717,37 @@ def run_controlled(
                                 aggregator.save_profile(conn, profile, pipeline_run_id)
                                 analyzed += 1
 
-                        print(f"  Review Intelligence: {analyzed} ASINs profiled ({review_count} reviews)")
-                        audit.record_count("reviews_analyzed", review_count)
-                        audit.record_count("review_profiles_created", analyzed)
+                    # 2. Tag ASINs that need review scraping (score >= 40, no reviews in DB)
+                    tagged_for_review = 0
+                    review_worthy = [opp["asin"] for opp in scored
+                                     if opp.get("final_score", 0) >= 40 and opp.get("is_valid", True)]
+                    if review_worthy:
+                        with conn.cursor() as cur:
+                            # Find which of these ASINs have NO reviews
+                            cur.execute("""
+                                SELECT asin FROM unnest(%s::text[]) AS t(asin)
+                                WHERE NOT EXISTS (
+                                    SELECT 1 FROM reviews r WHERE r.asin = t.asin
+                                )
+                            """, (review_worthy,))
+                            asins_needing_reviews = [row[0] for row in cur.fetchall()]
+
+                            # Tag them in asins table
+                            if asins_needing_reviews:
+                                cur.execute("""
+                                    UPDATE asins
+                                    SET review_needed = true
+                                    WHERE asin = ANY(%s)
+                                """, (asins_needing_reviews,))
+                                tagged_for_review = cur.rowcount
+
+                    conn.commit()
+
+                    print(f"  Review Intelligence: {analyzed} ASINs profiled ({review_count} reviews in DB)")
+                    print(f"  Review tagging: {tagged_for_review} ASINs tagged as review_needed (async backfill)")
+                    audit.record_count("reviews_analyzed", review_count)
+                    audit.record_count("review_profiles_created", analyzed)
+                    audit.record_count("asins_tagged_review_needed", tagged_for_review)
                 finally:
                     pool.putconn(conn)
             except ImportError:
@@ -717,6 +756,10 @@ def run_controlled(
                 audit.warn(f"Review intelligence failed (non-blocking): {e}")
 
         # --- Step 6e: Economic Event Detection (V2.0) ---
+        # NOTE: This is NOT redundant with DB triggers.
+        # - DB triggers (on snapshot_insert): detect raw atomic events (price drop, BSR spike)
+        # - This phase: detects COMPOSITE patterns (supply shock = stockout + BSR drop + seller churn)
+        #   that require cross-signal aggregation impossible in SQL triggers alone.
         with audit.time_phase("event_detection"):
             try:
                 from src.events.economic_events import EconomicEventDetector

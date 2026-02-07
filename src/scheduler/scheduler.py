@@ -42,7 +42,6 @@ class SchedulerConfig:
     """Scheduler configuration."""
     enabled: bool = True
     run_interval_hours: int = 24
-    min_tokens_per_run: int = 50
     max_categories_per_run: int = 5
     max_asins_per_category: int = 100
     discovery_enabled: bool = True
@@ -50,10 +49,25 @@ class SchedulerConfig:
     target_domains: List[str] = None
     use_strategy_agent: bool = True   # V3.0: Enable intelligent allocation
     enable_llm_consultation: bool = False  # V3.0: LLM for ambiguous cases
+    safety_margin_pct: float = 0.10   # 10% safety margin on token estimates
 
     def __post_init__(self):
         if self.target_domains is None:
             self.target_domains = ["com", "fr"]
+
+    def estimate_tokens_needed(self, num_categories: int = None) -> int:
+        """
+        Estimate tokens needed for a full run.
+
+        Formula: (discovery_cost + 2 * asins) * categories + safety_margin
+        - discovery_cost: ~5 tokens per category
+        - product query: ~2 tokens per ASIN
+        """
+        cats = num_categories or self.max_categories_per_run
+        per_category = 5 + (self.max_asins_per_category * 2)  # discovery + product queries
+        base = per_category * cats
+        margin = int(base * self.safety_margin_pct)
+        return base + margin
 
 
 @dataclass
@@ -122,8 +136,8 @@ class SmartScheduler:
             return SchedulerConfig(
                 enabled=config_dict.get("enabled", True) == "true" or config_dict.get("enabled") is True,
                 run_interval_hours=int(config_dict.get("run_interval_hours", 24)),
-                min_tokens_per_run=int(config_dict.get("min_tokens_per_run", 50)),
                 max_categories_per_run=int(config_dict.get("max_categories_per_run", 5)),
+                max_asins_per_category=int(config_dict.get("max_asins_per_category", 100)),
                 discovery_enabled=config_dict.get("discovery_enabled", "true") == "true",
                 discovery_depth=int(config_dict.get("discovery_depth", 2)),
                 target_domains=config_dict.get("target_domains", ["com", "fr"]),
@@ -180,6 +194,8 @@ class SmartScheduler:
         """
         Check if a run should be triggered.
 
+        Uses adaptive token estimation instead of a fixed minimum.
+
         Returns:
             True if scheduler should run now
         """
@@ -188,12 +204,27 @@ class SmartScheduler:
             return False
 
         budget = self.budget_manager.get_status()
-        if budget.tokens_remaining < self.config.min_tokens_per_run:
-            logger.warning(f"Insufficient budget: {budget.tokens_remaining} < {self.config.min_tokens_per_run}")
+        tokens_needed = self.config.estimate_tokens_needed()
+
+        if budget.tokens_remaining < tokens_needed:
+            logger.warning(
+                f"Insufficient budget: {budget.tokens_remaining} remaining "
+                f"< {tokens_needed} estimated needed "
+                f"({self.config.max_categories_per_run} cats × "
+                f"{self.config.max_asins_per_category} ASINs + 10% margin)"
+            )
             return False
 
-        # Check if enough time has passed since last run
-        # (In production, would check last_run_at from DB)
+        # Check daily budget — don't exceed daily allocation
+        daily_budget = self.budget_manager.get_daily_budget()
+        if tokens_needed > daily_budget:
+            logger.warning(
+                f"Run would exceed daily budget: {tokens_needed} needed > {daily_budget} daily budget. "
+                f"Adapting to fit within daily budget."
+            )
+            # Still allow the run but log the warning — the strategy agent
+            # will allocate tokens within the available daily budget anyway
+
         return True
 
     def get_strategy_decision(self) -> Dict[str, Any]:
@@ -414,11 +445,8 @@ class SmartScheduler:
                     error=result.stderr[:500],
                 )
 
-            # Parse output for metrics (would need to enhance run_controlled.py to output JSON)
-            # For now, use placeholder values
-            tokens_used = 100  # Placeholder
-            asins = 50
-            opps = 5
+            # Parse metrics from run_controlled.py output
+            tokens_used, asins, opps = self._parse_run_output(result.stdout)
 
             return RunResult(
                 success=True,
@@ -457,6 +485,44 @@ class SmartScheduler:
                 duration_seconds=duration,
                 error=str(e),
             )
+
+    @staticmethod
+    def _parse_run_output(stdout: str) -> tuple:
+        """
+        Parse run_controlled.py stdout for metrics.
+
+        Looks for the SUMMARY block lines like:
+            Products fetched:    85
+            Tokens used:         210
+            ...with 'opportunities' in scored >= 40
+
+        Returns:
+            (tokens_used, asins_processed, opportunities_found)
+        """
+        import re
+        tokens_used = 0
+        asins = 0
+        opps = 0
+
+        for line in stdout.splitlines():
+            line = line.strip()
+            # "Tokens used:         210"
+            m = re.match(r"Tokens used:\s+([0-9,]+)", line)
+            if m:
+                tokens_used = int(m.group(1).replace(",", ""))
+                continue
+            # "Products fetched:    85"
+            m = re.match(r"Products fetched:\s+([0-9,]+)", line)
+            if m:
+                asins = int(m.group(1).replace(",", ""))
+                continue
+            # "60-79:  12" or "80-100:   3" (score distribution buckets >= 40)
+            m = re.match(r"(40-59|60-79|80-100):\s+(\d+)", line)
+            if m:
+                opps += int(m.group(2))
+                continue
+
+        return tokens_used, asins, opps
 
     def run(self) -> Dict[str, Any]:
         """

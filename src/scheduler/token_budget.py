@@ -46,15 +46,15 @@ class TokenBudgetManager:
 
     Tracks usage, enforces limits, and allocates tokens between
     discovery (finding new categories) and scanning (regular pipeline runs).
+
+    Environment Variables:
+        KEEPA_MONTHLY_TOKEN_LIMIT: Monthly token budget (default: 900000)
+        KEEPA_TOKENS_PER_MINUTE: Refill rate (default: 21)
+        KEEPA_DISCOVERY_BUDGET_PCT: % for discovery (default: 20)
+        KEEPA_SCANNING_BUDGET_PCT: % for scanning (default: 80)
+        KEEPA_TOKENS_PER_ASIN: Tokens per ASIN query (default: 2)
+        KEEPA_TOKENS_PER_DISCOVERY: Tokens per discovery query (default: 5)
     """
-
-    # Default monthly budget based on Keepa plan
-    # 21 tokens/min * 60 * 24 * 30 = 907,200 tokens/month
-    DEFAULT_MONTHLY_LIMIT = 900_000
-
-    # Allocation percentages
-    DEFAULT_DISCOVERY_PCT = 20
-    DEFAULT_SCANNING_PCT = 80
 
     def __init__(self, conn=None):
         """
@@ -65,6 +65,14 @@ class TokenBudgetManager:
         """
         self.conn = conn
         self._owns_connection = False
+
+        # Load from env with sensible defaults
+        self.monthly_limit = int(os.getenv("KEEPA_MONTHLY_TOKEN_LIMIT", "900000"))
+        self.tokens_per_minute = int(os.getenv("KEEPA_TOKENS_PER_MINUTE", "21"))
+        self.discovery_pct = int(os.getenv("KEEPA_DISCOVERY_BUDGET_PCT", "20"))
+        self.scanning_pct = int(os.getenv("KEEPA_SCANNING_BUDGET_PCT", "80"))
+        self.tokens_per_asin = int(os.getenv("KEEPA_TOKENS_PER_ASIN", "2"))
+        self.tokens_per_discovery = int(os.getenv("KEEPA_TOKENS_PER_DISCOVERY", "5"))
 
     def _get_connection(self):
         """Get or create database connection."""
@@ -101,7 +109,7 @@ class TokenBudgetManager:
                 INSERT INTO token_budget (month_year, monthly_limit, discovery_allocation_pct, scanning_allocation_pct)
                 VALUES (%s, %s, %s, %s)
                 ON CONFLICT (month_year) DO NOTHING
-            """, (month, self.DEFAULT_MONTHLY_LIMIT, self.DEFAULT_DISCOVERY_PCT, self.DEFAULT_SCANNING_PCT))
+            """, (month, self.monthly_limit, self.discovery_pct, self.scanning_pct))
             conn.commit()
 
     def get_status(self, month: Optional[str] = None) -> BudgetStatus:
@@ -257,15 +265,15 @@ class TokenBudgetManager:
         """
         Estimate tokens needed for a given number of ASINs.
 
+        Uses configurable per-ASIN and per-discovery costs.
+
         Args:
             asin_count: Number of ASINs to query
 
         Returns:
             Estimated tokens needed
         """
-        # Discovery: ~5 tokens
-        # Product query: ~2 tokens/ASIN
-        return 5 + (asin_count * 2)
+        return self.tokens_per_discovery + (asin_count * self.tokens_per_asin)
 
     def close(self):
         """Close connection if we own it."""

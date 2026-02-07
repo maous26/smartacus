@@ -92,7 +92,7 @@ export function ReviewInsightPanel({ asin, isDemo = false }: ReviewInsightPanelP
   const painColors = PAIN_COLORS[profile.dominantPain || ''] || 'bg-gray-100 text-gray-700 border-gray-300';
 
   return (
-    <div className="mb-6">
+    <div className="mb-6" data-panel="reviews">
       <h3 className="text-sm uppercase tracking-wide text-gray-500 mb-3">
         Intelligence Reviews
         <span className="text-xs font-normal text-gray-400 ml-2">

@@ -89,19 +89,26 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS configuration - allow all localhost ports for development
+# CORS configuration
+# In production, set CORS_ORIGINS env var (comma-separated) for Railway/Vercel domains
+# e.g. CORS_ORIGINS=https://smartacus-web.up.railway.app,https://smartacus.vercel.app
+_default_origins = [
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://localhost:3002",
+    "http://localhost:3003",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
+    "http://127.0.0.1:3002",
+    "http://127.0.0.1:3003",
+]
+_extra_origins = os.getenv("CORS_ORIGINS", "")
+if _extra_origins:
+    _default_origins.extend([o.strip() for o in _extra_origins.split(",") if o.strip()])
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:3001",
-        "http://localhost:3002",
-        "http://localhost:3003",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:3001",
-        "http://127.0.0.1:3002",
-        "http://127.0.0.1:3003",
-    ],
+    allow_origins=_default_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
