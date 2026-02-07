@@ -153,12 +153,12 @@ def _run_backfill_sync(asin: str, domain: str) -> dict:
     try:
         from src.data.outscraper_client import OutscraperClient, OutscraperError
 
-        # Oxylabs credentials (env vars read inside OutscraperClient)
-        if not os.getenv("OXYLABS_USERNAME") or not os.getenv("OXYLABS_PASSWORD"):
-            result["error"] = "OXYLABS_USERNAME/OXYLABS_PASSWORD not configured"
+        api_key = os.getenv("OUTSCRAPER_API_KEY")
+        if not api_key:
+            result["error"] = "OUTSCRAPER_API_KEY not configured in .env"
             return result
 
-        client = OutscraperClient()
+        client = OutscraperClient(api_key=api_key)
         reviews = client.fetch_product_reviews(
             asin,
             domain=domain,
