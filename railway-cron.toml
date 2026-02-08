@@ -1,0 +1,8 @@
+[build]
+builder = "nixpacks"
+
+[build.nixpacks]
+plan = "python"
+
+[deploy]
+startCommand = "python scripts/run_controlled.py --domain fr --skip-discovery --max-asins 50 --freeze"
