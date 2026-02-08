@@ -35,6 +35,8 @@ class ComponentScoreModel(BaseModel):
     score: int
     maxScore: int = Field(alias="max_score")
     percentage: float
+    explanation: Optional[str] = None
+    details: Optional[Dict[str, Any]] = None
 
     class Config:
         populate_by_name = True

@@ -11,6 +11,7 @@ export interface ComponentScore {
   score: number;
   maxScore: number;
   percentage: number;
+  explanation?: string;
   details?: Record<string, any>;
 }
 

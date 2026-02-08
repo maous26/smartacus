@@ -70,6 +70,8 @@ interface ApiShortlistResponse {
       score: number;
       max_score: number;
       percentage: number;
+      explanation?: string;
+      details?: Record<string, any>;
     }>;
     economic_events: Array<{
       event_type: string;
@@ -131,6 +133,8 @@ function transformShortlistResponse(api: ApiShortlistResponse): ShortlistRespons
             score: val.score,
             maxScore: val.max_score,
             percentage: val.percentage,
+            explanation: val.explanation,
+            details: val.details,
           },
         ])
       ),

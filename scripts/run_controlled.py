@@ -590,6 +590,18 @@ def run_controlled(
                     # Run economic scorer
                     result = scorer.score_economic(product_data, time_data)
 
+                    # Serialize component scores with details + explanation
+                    comp_scores_dict = {}
+                    if hasattr(result, 'component_scores') and result.component_scores:
+                        for cname, cobj in result.component_scores.items():
+                            comp_scores_dict[cname] = {
+                                "score": cobj.score,
+                                "max_score": cobj.max_score,
+                                "percentage": cobj.percentage,
+                                "details": cobj.details,
+                                "explanation": cobj.explanation,
+                            }
+
                     scored.append({
                         "asin": product.asin,
                         "title": product.metadata.title[:60] if product.metadata.title else "N/A",
@@ -607,6 +619,7 @@ def run_controlled(
                         "price": float(product.current_snapshot.price_current) if product.current_snapshot.price_current else None,
                         "bsr": product.current_snapshot.bsr_primary,
                         "reviews": product.current_snapshot.review_count,
+                        "component_scores": comp_scores_dict,
                     })
 
                 except Exception as e:
@@ -655,7 +668,7 @@ def run_controlled(
                             """, (
                                 pipeline_run_id, opp["asin"], rank,
                                 opp["final_score"], opp["base_score"], opp["time_multiplier"],
-                                json.dumps({}), json.dumps({}),
+                                json.dumps(opp.get("component_scores", {})), json.dumps({}),
                                 opp.get("thesis", ""), _generate_action(opp.get("window_days", 90)),
                                 opp["monthly_profit"], opp["annual_value"],
                                 opp["risk_adjusted_value"], opp["window_days"], opp.get("urgency", "standard"),

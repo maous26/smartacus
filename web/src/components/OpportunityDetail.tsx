@@ -61,8 +61,80 @@ interface OpportunityDetailProps {
   isDemo?: boolean;
 }
 
-function ScoreBar({ name, score, maxScore }: { name: string; score: number; maxScore: number }) {
+const SCORE_META: Record<string, { label: string; description: string; icon: string }> = {
+  margin: {
+    label: 'Marge',
+    description: 'Viabilite economique apres tous les couts (FBA, PPC, retours, stockage)',
+    icon: '\u{1F4B0}',
+  },
+  velocity: {
+    label: 'Velocite',
+    description: 'Demande et momentum du produit (BSR, tendances, reviews/mois)',
+    icon: '\u{1F680}',
+  },
+  competition: {
+    label: 'Competition',
+    description: 'Accessibilite du marche (nb vendeurs, rotation buy box, gap reviews)',
+    icon: '\u{1F3AF}',
+  },
+  gap: {
+    label: 'Potentiel amelioration',
+    description: 'Opportunite de faire mieux (avis negatifs, souhaits clients, questions)',
+    icon: '\u{1F50D}',
+  },
+  time_pressure: {
+    label: 'Pression temporelle',
+    description: 'Urgence d\'agir (ruptures, tendance prix, churn vendeurs, acceleration BSR)',
+    icon: '\u{23F1}\u{FE0F}',
+  },
+};
+
+const DETAIL_LABELS: Record<string, string> = {
+  net_margin_percent: 'Marge nette',
+  amazon_price: 'Prix Amazon',
+  total_cost: 'Cout total',
+  bsr_current: 'BSR actuel',
+  bsr_delta_7d: 'BSR delta 7j',
+  bsr_delta_30d: 'BSR delta 30j',
+  reviews_per_month: 'Reviews/mois',
+  is_stagnant: 'Produit stagnant',
+  seller_count: 'Vendeurs FBA',
+  buybox_rotation: 'Rotation buy box',
+  review_gap_vs_top10: 'Gap reviews vs top 10',
+  has_amazon_basics: 'Amazon Basics present',
+  has_brand_dominance: 'Dominance marque',
+  negative_review_percent: 'Avis negatifs',
+  wish_mentions_per_100: 'Mentions "I wish"/100',
+  unanswered_questions: 'Questions sans reponse',
+  has_recurring_problems: 'Problemes recurrents',
+  stockout_count_90d: 'Ruptures 90j',
+  price_trend_30d: 'Tendance prix 30j',
+  seller_churn_90d: 'Churn vendeurs 90j',
+  bsr_acceleration: 'Acceleration BSR',
+};
+
+function formatDetailValue(key: string, value: any): string {
+  if (value === null || value === undefined) return '-';
+  if (typeof value === 'boolean') return value ? 'Oui' : 'Non';
+  if (key.includes('percent') || key.includes('rotation') || key.includes('gap') || key.includes('delta') || key.includes('trend') || key.includes('acceleration'))
+    return `${(Number(value) * 100).toFixed(1)}%`;
+  if (key.includes('price') || key.includes('cost'))
+    return `$${Number(value).toFixed(2)}`;
+  if (key === 'bsr_current')
+    return Number(value).toLocaleString('fr-FR');
+  return String(value);
+}
+
+function ScoreBar({ name, score, maxScore, explanation, details }: {
+  name: string;
+  score: number;
+  maxScore: number;
+  explanation?: string;
+  details?: Record<string, any>;
+}) {
+  const [expanded, setExpanded] = useState(false);
   const percentage = (score / maxScore) * 100;
+  const meta = SCORE_META[name] || { label: name, description: '', icon: '' };
 
   const getBarColor = () => {
     if (percentage >= 80) return 'bg-emerald-500';
@@ -72,18 +144,77 @@ function ScoreBar({ name, score, maxScore }: { name: string; score: number; maxS
     return 'bg-red-500';
   };
 
+  const hasDetails = (details && Object.keys(details).length > 0) || explanation;
+
+  // Filter out sub_scores from main details (shown separately)
+  const mainDetails = details
+    ? Object.entries(details).filter(([k]) => k !== 'sub_scores' && k !== 'is_valid' && k !== 'minimum_required')
+    : [];
+  const subScores = details?.sub_scores as Record<string, number> | undefined;
+
   return (
     <div className="mb-3">
-      <div className="flex justify-between text-sm mb-1">
-        <span className="font-medium text-gray-700 capitalize">{name}</span>
-        <span className="text-gray-500">{score}/{maxScore}</span>
-      </div>
-      <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
-        <div
-          className={`h-full ${getBarColor()} transition-all duration-500`}
-          style={{ width: `${percentage}%` }}
-        />
-      </div>
+      <button
+        onClick={() => hasDetails && setExpanded(!expanded)}
+        className={`w-full text-left ${hasDetails ? 'cursor-pointer hover:bg-gray-100 rounded-lg -mx-1 px-1 py-0.5 transition-colors' : ''}`}
+      >
+        <div className="flex justify-between text-sm mb-1">
+          <span className="font-medium text-gray-700">
+            {meta.icon} {meta.label}
+            <span className="text-xs text-gray-400 ml-1">/{maxScore}pts</span>
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="font-semibold text-gray-800">{score}</span>
+            <span className="text-gray-400">/{maxScore}</span>
+            {hasDetails && (
+              <svg className={`w-3.5 h-3.5 text-gray-400 transition-transform ${expanded ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            )}
+          </span>
+        </div>
+        <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+          <div
+            className={`h-full ${getBarColor()} transition-all duration-500`}
+            style={{ width: `${percentage}%` }}
+          />
+        </div>
+      </button>
+
+      {expanded && (
+        <div className="mt-2 ml-1 pl-3 border-l-2 border-gray-200 text-xs space-y-1.5">
+          {meta.description && (
+            <p className="text-gray-500 italic">{meta.description}</p>
+          )}
+
+          {mainDetails.length > 0 && (
+            <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-gray-600">
+              {mainDetails.map(([key, value]) => (
+                <div key={key} className="flex justify-between">
+                  <span className="text-gray-500">{DETAIL_LABELS[key] || key}</span>
+                  <span className="font-mono font-medium">{formatDetailValue(key, value)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {subScores && Object.keys(subScores).length > 0 && (
+            <div className="mt-1.5 pt-1.5 border-t border-gray-100">
+              <span className="text-gray-400 font-medium">Sous-composantes :</span>
+              <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 mt-1">
+                {Object.entries(subScores).map(([key, pts]) => (
+                  <div key={key} className="flex justify-between">
+                    <span className="text-gray-500">{DETAIL_LABELS[key] || key.replace(/_/g, ' ')}</span>
+                    <span className={`font-mono font-medium ${Number(pts) > 0 ? 'text-emerald-600' : Number(pts) < 0 ? 'text-red-500' : 'text-gray-400'}`}>
+                      {Number(pts) > 0 ? '+' : ''}{pts}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -541,7 +672,10 @@ export function OpportunityDetail({ opportunity, onClose, onStartSourcing, isDem
         {/* Score breakdown */}
         {componentScores && Object.keys(componentScores).length > 0 && (
           <div className="mb-6" data-panel="scores">
-            <h3 className="text-sm uppercase tracking-wide text-gray-500 mb-3">Décomposition du score</h3>
+            <h3 className="text-sm uppercase tracking-wide text-gray-500 mb-3">
+              Decomposition du score
+              <span className="text-xs text-gray-400 normal-case ml-2">cliquez pour voir le detail</span>
+            </h3>
             <div className="bg-gray-50 rounded-xl p-4 border border-gray-200 transition-all duration-300">
               {Object.entries(componentScores).map(([name, comp]) => (
                 <ScoreBar
@@ -549,6 +683,8 @@ export function OpportunityDetail({ opportunity, onClose, onStartSourcing, isDem
                   name={name}
                   score={comp.score}
                   maxScore={comp.maxScore}
+                  explanation={comp.explanation}
+                  details={comp.details}
                 />
               ))}
 
@@ -559,7 +695,7 @@ export function OpportunityDetail({ opportunity, onClose, onStartSourcing, isDem
                 </div>
                 <div>
                   <span className="text-gray-500">Multiplicateur temps: </span>
-                  <span className="font-medium">×{timeMultiplier.toFixed(2)}</span>
+                  <span className="font-medium">{'\u00D7'}{timeMultiplier.toFixed(2)}</span>
                 </div>
               </div>
             </div>

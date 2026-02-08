@@ -441,11 +441,18 @@ class ShortlistService:
                         comp_scores = {}
                         if component_scores_json and isinstance(component_scores_json, dict):
                             for name, data in component_scores_json.items():
+                                s = data.get("score", 0)
+                                ms = data.get("max_score", 0)
+                                pct = data.get("percentage", 0)
+                                if not pct and ms > 0:
+                                    pct = round(s / ms * 100, 1)
                                 comp_scores[name] = ComponentScoreModel(
                                     name=name,
-                                    score=data.get("score", 0),
-                                    max_score=data.get("max_score", 0),
-                                    percentage=data.get("percentage", 0),
+                                    score=s,
+                                    max_score=ms,
+                                    percentage=pct,
+                                    explanation=data.get("explanation"),
+                                    details=data.get("details"),
                                 )
 
                         # Build events: prefer from economic_events table, fallback to JSONB
